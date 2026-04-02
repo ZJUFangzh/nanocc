@@ -119,21 +119,192 @@ uv tool install -e .    # 安装到 ~/.local/bin/nanocc
 
 ## 架构
 
+### 全局概览
+
 ```
-CLI / Channel / SDK
-       ↓
-  QueryEngine (engine.py)      ← 有状态会话容器
-       ↓
-  query() (query.py)           ← 异步 generator 状态机（核心循环）
-       ↓
-  LLMProvider.stream()         ← 归一化 ProviderEvent
-       ↓
-  Tool Orchestration            ← 读工具并行 / 写工具串行
+┌─────────────────────────────────────────────────────────┐
+│                      入口层                              │
+│    CLI (click+rich)  │  Channel (IM)  │  SDK (编程接口)   │
+└─────────┬───────────┴───────┬────────┴──────┬───────────┘
+          │                   │               │
+          ▼                   ▼               ▼
+┌─────────────────────────────────────────────────────────┐
+│              QueryEngine (engine.py)                     │
+│  有状态会话容器：messages、usage、abort、                  │
+│  记忆抽取、会话持久化（--continue 恢复）                   │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│              query() (query.py)                          │
+│  异步 generator 状态机 — 核心 agent loop                  │
+│                                                          │
+│  ┌─ 每轮迭代 ───────────────────────────────────────┐   │
+│  │ 1. 上下文管线：budget → micro → auto compact      │   │
+│  │ 2. LLM 流式：provider.stream() → ProviderEvent   │   │
+│  │ 3. Abort 检查 + synthetic tool_result 补齐        │   │
+│  │ 4. 工具执行（读并行 / 写串行）                     │   │
+│  │    ├─ hook: tool_start                            │   │
+│  │    ├─ 执行工具                                    │   │
+│  │    └─ hook: tool_complete                         │   │
+│  │ 5. End turn → hook: stop → Terminal               │   │
+│  └──────────────────────────────────────────────────┘   │
+└────────┬──────────────────┬─────────────────────────────┘
+         │                  │
+         ▼                  ▼
+┌────────────────┐  ┌────────────────────────────────────┐
+│  LLM Providers │  │  工具编排                           │
+│                │  │                                     │
+│  ProviderEvent │  │  partition_tool_calls():             │
+│  归一化层      │  │    read_only=True  → 并行（≤10）    │
+│                │  │    read_only=False → 串行            │
+│  • anthropic   │  │                                     │
+│  • openai_compat│  │  12 个内置工具 + MCP 工具           │
+│  • custom      │  │                                     │
+└────────────────┘  └────────────────────────────────────┘
 ```
+
+### 核心 Agent Loop (`query.py`)
+
+nanocc 的心脏 — 忠实复刻 Claude Code 的异步 generator 状态机。**不是** ReAct 循环。
+
+```python
+async def query(params: QueryParams) -> AsyncGenerator[StreamEvent | Message, Terminal]:
+    state = LoopState(messages, tool_use_context, turn_count=0, ...)
+    while True:
+        # 1. 上下文治理管线
+        apply_tool_result_budget(state.messages)     # >30K 结果截断
+        micro_compact(state.messages)                 # 清理旧 tool_results
+        await auto_compact_if_needed(state.messages)  # 超阈值 LLM 摘要
+
+        # 2. 流式调用 LLM
+        async for event in provider.stream(messages, system_prompt, tools):
+            yield event  # text_delta, tool_use, usage, ...
+
+        # 3. 工具执行 + hook 触发
+        if tool_use_blocks:
+            await hook_engine.fire("tool_start", block)
+            result = await run_tool(block, context)
+            await hook_engine.fire("tool_complete", block, result)
+            continue  # 下一轮迭代
+
+        # 4. 无工具调用 → 结束
+        await hook_engine.fire("stop", messages)
+        return Terminal(reason="completed")
+```
+
+终止状态：`completed`、`aborted_streaming`、`aborted_tools`、`prompt_too_long`、`max_turns`、`model_error`
+
+### LLM Provider 抽象
+
+所有 Provider 实现相同协议 — agent loop 只看到归一化的 `ProviderEvent`，不接触任何 SDK 特定类型：
+
+```python
+class LLMProvider(Protocol):
+    async def stream(messages, system_prompt, tools, *, model, ...) -> AsyncGenerator[ProviderEvent]
+    def count_tokens(messages, model) -> int
+    def get_context_window(model) -> int
+```
+
+新增 Provider = 实现 3 个方法（约 300 行）。
+
+### 工具系统
+
+```python
+class Tool(Protocol):
+    name: str
+    input_schema: dict       # JSON Schema
+    is_read_only: bool       # True → 可并行
+
+    def check_permissions(input, context) -> allow | deny | ask
+    async def execute(input, context) -> ToolResult
+```
+
+并发模型（复刻 Claude Code）：
+- `is_read_only=True` 工具**并行**执行（最多 10 个并发）
+- 写工具**串行**执行，逐个运行
+
+### 三层上下文压缩
+
+Claude Code 7 层 → nanocc 3 层，效果一致：
+
+```
+Layer 1: tool_result_budget    ─── 单结果 >30K 字符 → 截断 + 落盘
+                ↓
+Layer 2: micro_compact         ─── 旧 tool_results → [cleared]，保留最近 5 个
+                ↓
+Layer 3: auto_compact          ─── 超阈值 → LLM 摘要压缩整段对话
+                ↓
+        post_compact           ─── 重注入最近 5 个文件 + 活跃 plan + 已加载 skill
+```
+
+关键阈值（与 Claude Code 一致）：autocompact 缓冲 13K tokens，摘要预留 20K tokens，post-compact 文件恢复最多 5 文件 / 50K tokens，连续失败 3 次熔断。
+
+### 记忆系统
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ 长期记忆 (memdir.py)                                     │
+│ MEMORY.md 索引（≤200 行）+ 单独 topic 文件                │
+│ 4 种类型：user | feedback | project | reference          │
+│ 检索：扫描 frontmatter → LLM 排序取 top 5 → 注入上下文   │
+├─────────────────────────────────────────────────────────┤
+│ 会话记忆 (session_memory.py)                              │
+│ 结构化工作笔记 — 10 个固定 section：                       │
+│ Current State, Task, Files Modified, Errors, Worklog,    │
+│ Open Questions, Dependencies, Decisions Made, ...        │
+│ 触发：10K token 初始化，5K 增量，3+ 工具调用               │
+├─────────────────────────────────────────────────────────┤
+│ 记忆抽取 (extract.py)                                    │
+│ 每轮结束后后台 fire-and-forget：                          │
+│ fork 子 agent → 分析对话 → 写入 memory 文件               │
+├─────────────────────────────────────────────────────────┤
+│ Auto Dream (auto_dream.py)                               │
+│ 离线记忆蒸馏（24h + 5 sessions 门控）：                    │
+│ Phase 1: Orient — 读取现有 memory 结构                    │
+│ Phase 2: Scan — 从 session transcript 中扫描信号           │
+│ Phase 3: Consolidate — LLM 合并、去重、日期绝对化          │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Hook 系统
+
+声明式 hooks 在工具执行边界自动触发 — 基础设施层面的保证，不是"建议 AI 去做"：
+
+| 事件 | 触发时机 | 典型用途 |
+|---|---|---|
+| `tool_start` | 工具执行前 | 输入验证、审计日志 |
+| `tool_complete` | 工具执行后 | 自动 lint、测试运行 |
+| `tool_error` | 工具出错时 | 错误上报 |
+| `stop` | Agent 完成回合 | 安全审查、通知 |
+| `subagent_stop` | 子 Agent 完成 | 结果聚合 |
+
+3 种 hook 类型：`command`（shell）、`prompt`（LLM）、`http`（webhook）。支持 `if` 条件匹配、`once` 一次性自动移除、session 级注册。
+
+### 子 Agent
+
+- **Fork** (`agents/fork.py`) — 创建隔离 agent，独立 message 历史但共享 provider。用于并行研究、skill fork 模式、记忆抽取。
+- **Coordinator** (`agents/coordinator.py`) — 向多个 fork agent 分发任务。并行模式处理只读任务，串行模式处理顺序写操作。
+- **AgentTool** — 作为工具暴露给 LLM，模型可按需派生子 agent。
+
+### MCP 集成
+
+轻量 MCP 客户端，支持 3 种传输协议：
+
+| 传输协议 | 使用场景 |
+|---|---|
+| `stdio` | 本地进程（如文件系统、数据库工具）|
+| `http` | 远程 HTTP 服务 |
+| `sse` | Server-Sent Events 流 |
+
+MCP 工具被包装为原生 `Tool` 对象（`mcp__{server}__{tool}`），参与统一的编排管线。资源通过 `list_resources` / `read_resource` 访问。
 
 ### Harness Engineering 设计理念
 
 nanocc 遵循「**Harness Engineering**」理念：不依赖 prompt engineering 控制 AI 怎么想，而是**设计 AI 工作的环境和反馈机制**，让正确行为成为系统属性。
+
+> **Prompt engineering** 像给新员工做入职培训——你教得再好，他也会忘。
+> **Harness engineering** 像设计办公环境和工作流程：编码规范贴在工位旁（CLAUDE.md 注入），每次提交自动跑 CI（hooks），犯过的错记在 wiki 里新人也能看到（feedback memory），每周 review 清理过期决策（auto dream）。
 
 | 模块 | Harness 机制 | 解决的问题 |
 |---|---|---|

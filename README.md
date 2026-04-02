@@ -108,21 +108,192 @@ Config priority: `/model` session override > CLI flags > env variables > `settin
 
 ## Architecture
 
+### High-Level Overview
+
 ```
-CLI / Channel / SDK
-       ↓
-  QueryEngine (engine.py)      ← stateful session container
-       ↓
-  query() (query.py)           ← async generator state machine (core loop)
-       ↓
-  LLMProvider.stream()         ← normalized ProviderEvent
-       ↓
-  Tool Orchestration            ← read-tools parallel / write-tools serial
+┌─────────────────────────────────────────────────────────┐
+│                  Entry Points                           │
+│   CLI (click+rich)  │  Channel (IM)  │  SDK (programmatic) │
+└─────────┬───────────┴───────┬────────┴──────┬───────────┘
+          │                   │               │
+          ▼                   ▼               ▼
+┌─────────────────────────────────────────────────────────┐
+│              QueryEngine (engine.py)                     │
+│  Stateful session container: messages, usage, abort,     │
+│  memory extraction, session persistence (--continue)     │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│              query() (query.py)                          │
+│  Async generator state machine — the core agent loop     │
+│                                                          │
+│  ┌─ each iteration ──────────────────────────────────┐  │
+│  │ 1. Context pipeline: budget → micro → auto compact │  │
+│  │ 2. LLM stream: provider.stream() → ProviderEvents  │  │
+│  │ 3. Abort check + synthetic tool_result backfill     │  │
+│  │ 4. Tool execution (parallel read / serial write)    │  │
+│  │    ├─ hook: tool_start                              │  │
+│  │    ├─ run tool                                      │  │
+│  │    └─ hook: tool_complete                           │  │
+│  │ 5. End turn → hook: stop → Terminal                 │  │
+│  └────────────────────────────────────────────────────┘  │
+└────────┬──────────────────┬─────────────────────────────┘
+         │                  │
+         ▼                  ▼
+┌────────────────┐  ┌────────────────────────────────────┐
+│  LLM Providers │  │  Tool Orchestration                 │
+│                │  │                                     │
+│  ProviderEvent │  │  partition_tool_calls():             │
+│  normalization │  │    read_only=True  → parallel (≤10) │
+│                │  │    read_only=False → serial          │
+│  • anthropic   │  │                                     │
+│  • openai_compat│  │  12 built-in tools + MCP tools     │
+│  • custom      │  │                                     │
+└────────────────┘  └────────────────────────────────────┘
 ```
+
+### Core Agent Loop (`query.py`)
+
+The heart of nanocc — a faithful reimplementation of Claude Code's async generator state machine. **Not** a ReAct loop.
+
+```python
+async def query(params: QueryParams) -> AsyncGenerator[StreamEvent | Message, Terminal]:
+    state = LoopState(messages, tool_use_context, turn_count=0, ...)
+    while True:
+        # 1. Context governance pipeline
+        apply_tool_result_budget(state.messages)     # truncate >30K results
+        micro_compact(state.messages)                 # clear old tool_results
+        await auto_compact_if_needed(state.messages)  # LLM-summarize if over threshold
+
+        # 2. Stream LLM response
+        async for event in provider.stream(messages, system_prompt, tools):
+            yield event  # text_delta, tool_use, usage, ...
+
+        # 3. Tool execution with hooks
+        if tool_use_blocks:
+            await hook_engine.fire("tool_start", block)
+            result = await run_tool(block, context)
+            await hook_engine.fire("tool_complete", block, result)
+            continue  # next loop iteration
+
+        # 4. No tools → end turn
+        await hook_engine.fire("stop", messages)
+        return Terminal(reason="completed")
+```
+
+Terminal reasons: `completed`, `aborted_streaming`, `aborted_tools`, `prompt_too_long`, `max_turns`, `model_error`
+
+### LLM Provider Abstraction
+
+All providers implement the same protocol — the agent loop only sees normalized `ProviderEvent`s, never SDK-specific types:
+
+```python
+class LLMProvider(Protocol):
+    async def stream(messages, system_prompt, tools, *, model, ...) -> AsyncGenerator[ProviderEvent]
+    def count_tokens(messages, model) -> int
+    def get_context_window(model) -> int
+```
+
+Adding a new provider = implement 3 methods (~300 lines).
+
+### Tool System
+
+```python
+class Tool(Protocol):
+    name: str
+    input_schema: dict       # JSON Schema
+    is_read_only: bool       # True → can run in parallel
+
+    def check_permissions(input, context) -> allow | deny | ask
+    async def execute(input, context) -> ToolResult
+```
+
+Concurrency model (replicating Claude Code):
+- `is_read_only=True` tools run **in parallel** (up to 10 concurrent)
+- Write tools run **serially**, one at a time
+
+### 3-Layer Context Compaction
+
+Claude Code uses 7 layers — nanocc distills them into 3 with the same effect:
+
+```
+Layer 1: tool_result_budget    ─── single result >30K chars → truncate + disk spill
+                ↓
+Layer 2: micro_compact         ─── old tool_results → [cleared], keep recent 5
+                ↓
+Layer 3: auto_compact          ─── over threshold → LLM summarizes entire conversation
+                ↓
+        post_compact           ─── re-inject last 5 files + active plan + loaded skills
+```
+
+Key thresholds (matching Claude Code): autocompact buffer 13K tokens, summary reserve 20K tokens, post-compact file recovery max 5 files / 50K tokens, circuit breaker after 3 consecutive failures.
+
+### Memory System
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Long-term Memory (memdir.py)                            │
+│ MEMORY.md index (≤200 lines) + individual topic files    │
+│ 4 types: user | feedback | project | reference           │
+│ Retrieval: scan frontmatter → LLM ranks top 5 → inject  │
+├─────────────────────────────────────────────────────────┤
+│ Session Memory (session_memory.py)                       │
+│ Structured working notes — 10 fixed sections:            │
+│ Current State, Task, Files Modified, Errors, Worklog,    │
+│ Open Questions, Dependencies, Decisions Made, ...        │
+│ Trigger: 10K tokens init, 5K incremental, 3+ tool calls │
+├─────────────────────────────────────────────────────────┤
+│ Memory Extract (extract.py)                              │
+│ Background fire-and-forget after each turn:              │
+│ fork sub-agent → analyze conversation → write memories   │
+├─────────────────────────────────────────────────────────┤
+│ Auto Dream (auto_dream.py)                               │
+│ Offline consolidation (24h + 5 sessions gate):           │
+│ Phase 1: Orient — read existing memory structure          │
+│ Phase 2: Scan — find signals in session transcripts       │
+│ Phase 3: Consolidate — LLM merges, dedupes, date-fixes   │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Hook System
+
+Declarative hooks auto-trigger at tool execution boundaries — infrastructure-level guarantees, not "suggestions to the AI":
+
+| Event | Fires When | Example Use |
+|---|---|---|
+| `tool_start` | Before tool execution | Validate inputs, audit logging |
+| `tool_complete` | After tool execution | Auto-lint, test runner |
+| `tool_error` | Tool raises error | Error reporting |
+| `stop` | Agent finishes turn | Security review, notifications |
+| `subagent_stop` | Sub-agent completes | Result aggregation |
+
+3 hook types: `command` (shell), `prompt` (LLM), `http` (webhook). Supports `if` condition matching, `once` auto-removal, and session-scoped registration.
+
+### Sub-Agents
+
+- **Fork** (`agents/fork.py`) — creates an isolated agent with its own message history but shared provider. Used for parallel research, skill fork mode, and memory extraction.
+- **Coordinator** (`agents/coordinator.py`) — dispatches tasks to multiple fork agents. Parallel mode for read-only tasks, serial mode for sequential writes.
+- **AgentTool** — exposed as a tool so the LLM can spawn sub-agents on demand.
+
+### MCP Integration
+
+Lightweight MCP client supporting 3 transports:
+
+| Transport | Use Case |
+|---|---|
+| `stdio` | Local process (e.g., filesystem, database tools) |
+| `http` | Remote HTTP server |
+| `sse` | Server-Sent Events stream |
+
+MCP tools are wrapped as native `Tool` objects (`mcp__{server}__{tool}`) and participate in the same orchestration pipeline. Resources are accessible via `list_resources` / `read_resource`.
 
 ### Harness Engineering
 
 nanocc follows a **"harness engineering"** philosophy: instead of relying on prompt engineering alone, the system **designs the environment** around the AI agent to make correct behavior a structural property.
+
+> **Prompt engineering** is like onboarding training — no matter how good it is, the employee forgets.
+> **Harness engineering** is like designing the office and workflow — the coding standards are posted at the desk (CLAUDE.md injection), every commit auto-runs CI (hooks), past mistakes are on the wiki for everyone (feedback memory), and weekly reviews clean up stale decisions (auto dream).
 
 | Module | Harness Mechanism | Problem Solved |
 |---|---|---|
