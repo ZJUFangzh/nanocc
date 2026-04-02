@@ -7,9 +7,9 @@
     CLI 日常使用 &nbsp;|&nbsp; Agent SDK 构建代理 &nbsp;|&nbsp; IM 通道对接
   </p>
   <p align="center">
-    <a href="https://github.com/fangzehua/nanocc/stargazers"><img src="https://img.shields.io/github/stars/fangzehua/nanocc?style=social" alt="GitHub Stars"></a>
+    <a href="https://github.com/ZJUFangzh/nanocc/stargazers"><img src="https://img.shields.io/github/stars/ZJUFangzh/nanocc?style=social" alt="GitHub Stars"></a>
     &nbsp;
-    <a href="https://github.com/fangzehua/nanocc/blob/main/LICENSE"><img src="https://img.shields.io/github/license/fangzehua/nanocc" alt="License"></a>
+    <a href="https://github.com/ZJUFangzh/nanocc/blob/main/LICENSE"><img src="https://img.shields.io/github/license/ZJUFangzh/nanocc" alt="License"></a>
     &nbsp;
     <img src="https://img.shields.io/badge/python-%3E%3D3.11-blue" alt="Python">
     &nbsp;
