@@ -376,6 +376,16 @@ See [docs/progress.md](docs/progress.md) for detailed phase-by-phase progress.
 - **LLM**: anthropic SDK (native) + openai SDK (compatibility layer)
 - **Types**: dataclass (no Pydantic)
 
+## Star History
+
+<a href="https://star-history.com/#ZJUFangzh/nanocc&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ZJUFangzh/nanocc&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ZJUFangzh/nanocc&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ZJUFangzh/nanocc&type=Date" />
+ </picture>
+</a>
+
 ## License
 
 MIT

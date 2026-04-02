@@ -387,6 +387,16 @@ uv run python -c "import nanocc"
 - **LLM**: anthropic SDK（原生）+ openai SDK（兼容层）
 - **类型系统**: dataclass（不用 Pydantic）
 
+## Star History
+
+<a href="https://star-history.com/#ZJUFangzh/nanocc&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ZJUFangzh/nanocc&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ZJUFangzh/nanocc&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ZJUFangzh/nanocc&type=Date" />
+ </picture>
+</a>
+
 ## 许可证
 
 MIT
