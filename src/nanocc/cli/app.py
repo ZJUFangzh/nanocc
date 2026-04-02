@@ -1,10 +1,11 @@
-"""CLI entry point — Rich REPL + one-shot mode with tool support."""
+"""CLI entry point — Rich REPL + one-shot mode via QueryEngine."""
 
 from __future__ import annotations
 
 import asyncio
 import os
 import sys
+import time
 
 import click
 from prompt_toolkit import PromptSession
@@ -15,32 +16,26 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.status import Status
 
-from nanocc.constants import DEFAULT_MODEL
-from nanocc.context import build_system_prompt, system_prompt_to_text
-from nanocc.messages import create_user_message, get_text_content
-from nanocc.memory.claude_md import load_claude_md
+from nanocc.engine import QueryEngine, QueryEngineConfig
+from nanocc.messages import get_text_content
 from nanocc.providers.registry import create_provider
-from nanocc.query import query
-from nanocc.tools.registry import get_all_tools
+from nanocc.utils.config import resolve_provider_config
 from nanocc.types import (
     AssistantMessage,
-    QueryParams,
     StreamEvent,
     StreamEventType,
     Terminal,
     TerminalReason,
     ToolResultBlock,
     ToolUseBlock,
-    ToolUseContext,
 )
-from nanocc.utils.abort import AbortController
 
 from .commands import SLASH_NAMES, handle_command
 
 console = Console()
 
 
-# ── Streaming loop ─────────────────────────────────────────────────────────
+# ── Streaming UI renderer ─────────────────────────────────────────────────
 
 
 def _render_tool_result(block: ToolResultBlock) -> None:
@@ -55,18 +50,20 @@ def _render_tool_result(block: ToolResultBlock) -> None:
         console.print(f"  [dim]{preview}[/dim]")
 
 
-async def _stream_loop(
-    params: QueryParams,
-    *,
-    all_messages: list | None = None,
-) -> tuple[int, int]:
-    """Run the agent loop, streaming text and handling tool calls.
+async def _stream_response(
+    engine: QueryEngine,
+    prompt: str,
+) -> tuple[int, int, float]:
+    """Stream a single engine response to the terminal.
 
-    Returns (input_tokens, output_tokens) accumulated during the loop.
+    Returns (input_tokens, output_tokens, elapsed_seconds).
     """
+    start_time = time.monotonic()
     collected_text = ""
     live: Live | None = None
     spinner: Status | None = None
+    spinner_task: asyncio.Task[None] | None = None
+    spinner_label: str = ""
     total_in = 0
     total_out = 0
 
@@ -77,16 +74,32 @@ async def _stream_loop(
             live = None
 
     def _stop_spinner() -> None:
-        nonlocal spinner
+        nonlocal spinner, spinner_task
+        if spinner_task is not None:
+            spinner_task.cancel()
+            spinner_task = None
         if spinner is not None:
             spinner.stop()
             spinner = None
 
+    async def _tick_spinner() -> None:
+        """Background task that updates spinner text with elapsed time every second."""
+        try:
+            while spinner is not None:
+                elapsed = time.monotonic() - start_time
+                spinner.update(f"{spinner_label} [dim]{_format_duration(elapsed)}[/dim]")
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+
     def _start_spinner(msg: str) -> None:
-        nonlocal spinner
+        nonlocal spinner, spinner_task, spinner_label
         _stop_spinner()
-        spinner = Status(msg, console=console, spinner="dots")
+        spinner_label = msg
+        elapsed = time.monotonic() - start_time
+        spinner = Status(f"{msg} [dim]{_format_duration(elapsed)}[/dim]", console=console, spinner="dots")
         spinner.start()
+        spinner_task = asyncio.create_task(_tick_spinner())
 
     def _start_live() -> None:
         nonlocal live
@@ -99,7 +112,7 @@ async def _stream_loop(
     _start_spinner("[cyan]Thinking…[/cyan]")
 
     try:
-        async for event in query(params):
+        async for event in engine.submit_message(prompt):
             if isinstance(event, Terminal):
                 _stop_live()
                 _stop_spinner()
@@ -108,6 +121,17 @@ async def _stream_loop(
                 break
 
             if isinstance(event, StreamEvent):
+                # Detect tool_use block start — show spinner during generation
+                if (
+                    event.type == StreamEventType.CONTENT_BLOCK_START
+                    and event.block_type == "tool_use"
+                ):
+                    if live is not None and collected_text:
+                        live.update(Markdown(collected_text))
+                    _stop_live()
+                    tool_label = event.tool_name or "tool"
+                    _start_spinner(f"[yellow]Preparing {tool_label}…[/yellow]")
+
                 if (
                     event.type == StreamEventType.CONTENT_BLOCK_DELTA
                     and event.delta
@@ -148,28 +172,35 @@ async def _stream_loop(
                         console.print(
                             f"[bold yellow]Tool:[/bold yellow] {tu.name}({_summarize_input(tu.input)})"
                         )
-                    # Force flush so tool info is visible before execution
-                    console.file.flush()
-                    # Spinner while tools execute
-                    _start_spinner("[yellow]Running tools…[/yellow]")
                     collected_text = ""
-
-                # Track in conversation history
-                if all_messages is not None:
-                    all_messages.append(event)
 
             elif isinstance(event, ToolResultBlock):
                 _render_tool_result(event)
 
-                # After last tool result, spinner while waiting for next LLM turn
-                _stop_spinner()
+                # After tool result, show thinking spinner for next LLM turn
                 _start_spinner("[cyan]Thinking…[/cyan]")
                 collected_text = ""
     finally:
         _stop_live()
         _stop_spinner()
 
-    return total_in, total_out
+    elapsed = time.monotonic() - start_time
+    return total_in, total_out, elapsed
+
+
+def _format_duration(seconds: float) -> str:
+    """Format elapsed seconds into a human-readable duration string."""
+    if seconds < 1:
+        return f"{seconds * 1000:.0f}ms"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds) // 60
+    secs = seconds - minutes * 60
+    if minutes < 60:
+        return f"{minutes}m {secs:.0f}s"
+    hours = minutes // 60
+    mins = minutes % 60
+    return f"{hours}h {mins}m {secs:.0f}s"
 
 
 def _summarize_input(input: dict) -> str:
@@ -187,44 +218,43 @@ def _summarize_input(input: dict) -> str:
 # ── One-shot mode ──────────────────────────────────────────────────────────
 
 
-async def run_query(
-    prompt: str,
+def _create_engine(
     model: str,
-    system_prompt: str = "",
-    provider_name: str = "openrouter",
-    api_key: str | None = None,
-) -> None:
-    """Run a single query and stream the response to the terminal."""
-    provider = create_provider(provider_name, api_key=api_key)
-    abort = AbortController()
-    tools = get_all_tools()
+    system_prompt: str,
+    provider_name: str,
+    api_key: str | None,
+    base_url: str | None = None,
+) -> QueryEngine:
+    """Create a QueryEngine from resolved config."""
+    kwargs: dict[str, str] = {}
+    if api_key:
+        kwargs["api_key"] = api_key
+    if base_url:
+        kwargs["base_url"] = base_url
+
+    provider = create_provider(provider_name, **kwargs)
     cwd = os.getcwd()
 
-    messages = [create_user_message(prompt)]
-
-    # Build three-segment system prompt with environment context
-    user_context: dict[str, str] = {"Project Instructions": load_claude_md(cwd) or ""}
-    system_blocks = build_system_prompt(
-        base_prompt=system_prompt or "",
-        user_context=user_context if any(user_context.values()) else None,
-        cwd=cwd,
-    )
-    # OpenAI-compat providers need plain text
-    system_text = system_prompt_to_text(system_blocks)
-
-    tool_context = ToolUseContext(cwd=cwd, tools=tools, abort_controller=abort, model=model)
-
-    params = QueryParams(
-        messages=messages,
-        system_prompt=system_text,
+    return QueryEngine(QueryEngineConfig(
         provider=provider,
         model=model,
-        tools=tools,
-        abort_controller=abort,
-        tool_use_context=tool_context,
-    )
+        cwd=cwd,
+        system_prompt=system_prompt,
+    ))
 
-    await _stream_loop(params)
+
+async def run_query(
+    model: str,
+    system_prompt: str,
+    provider_name: str,
+    api_key: str | None,
+    prompt: str,
+    base_url: str | None = None,
+) -> None:
+    """Run a single query via QueryEngine and stream to terminal."""
+    engine = _create_engine(model, system_prompt, provider_name, api_key, base_url)
+    _, tok_out, elapsed = await _stream_response(engine, prompt)
+    console.print(f"\n[dim]{tok_out:,} tokens | {_format_duration(elapsed)}[/dim]")
 
 
 # ── REPL mode ──────────────────────────────────────────────────────────────
@@ -232,33 +262,20 @@ async def run_query(
 
 async def repl(
     model: str,
-    system_prompt: str = "",
-    provider_name: str = "openrouter",
-    api_key: str | None = None,
+    system_prompt: str,
+    provider_name: str,
+    api_key: str | None,
+    base_url: str | None = None,
 ) -> None:
-    """Interactive REPL loop with prompt_toolkit input + Rich output."""
-    provider = create_provider(provider_name, api_key=api_key)
-    tools = get_all_tools()
-    cwd = os.getcwd()
-    all_messages: list = []
-    total_tokens = 0
-    total_cost = 0.0
-
-    # Build three-segment system prompt with CLAUDE.md loaded
-    user_context: dict[str, str] = {"Project Instructions": load_claude_md(cwd) or ""}
-    system_blocks = build_system_prompt(
-        base_prompt=system_prompt or "",
-        user_context=user_context if any(user_context.values()) else None,
-        cwd=cwd,
-    )
-    system_prompt = system_prompt_to_text(system_blocks)
+    """Interactive REPL loop via QueryEngine."""
+    engine = _create_engine(model, system_prompt, provider_name, api_key, base_url)
 
     # Welcome banner
     console.print(
         f"[bold cyan]nanocc[/bold cyan] [dim]({model})[/dim]",
         highlight=False,
     )
-    tool_names = ", ".join(t.name for t in tools)
+    tool_names = ", ".join(t.name for t in engine.tools)
     console.print(f"[dim]Tools: {tool_names}[/dim]")
     console.print("[dim]Type /help for commands, /exit to quit.[/dim]\n")
 
@@ -268,6 +285,8 @@ async def repl(
         history=FileHistory(history_path),
         completer=WordCompleter(SLASH_NAMES, sentence=True),
     )
+
+    total_tokens = 0
 
     while True:
         try:
@@ -284,38 +303,20 @@ async def repl(
             result = handle_command(
                 user_input,
                 console=console,
-                all_messages=all_messages,
-                model=model,
+                engine=engine,
                 total_tokens=total_tokens,
-                total_cost=total_cost,
+                total_cost=0.0,
             )
             if result == "exit":
                 break
             continue
 
-        all_messages.append(create_user_message(user_input))
-        abort = AbortController()
-
-        tool_context = ToolUseContext(
-            cwd=cwd, tools=tools, abort_controller=abort, model=model
-        )
-
-        params = QueryParams(
-            messages=all_messages,
-            system_prompt=system_prompt,
-            provider=provider,
-            model=model,
-            tools=tools,
-            abort_controller=abort,
-            tool_use_context=tool_context,
-        )
-
         try:
-            tok_in, tok_out = await _stream_loop(params, all_messages=all_messages)
+            tok_in, tok_out, elapsed = await _stream_response(engine, user_input)
             total_tokens += tok_in + tok_out
-            console.print(f"\n[dim]{tok_in + tok_out:,} tokens[/dim]\n")
+            console.print(f"\n[dim]{tok_out:,} tokens | {_format_duration(elapsed)}[/dim]\n")
         except KeyboardInterrupt:
-            abort.abort()
+            engine.abort()
             console.print("\n[dim]Interrupted.[/dim]")
 
 
@@ -324,47 +325,47 @@ async def repl(
 
 @click.command()
 @click.option("-p", "--prompt", default=None, help="One-shot prompt (non-interactive).")
-@click.option("-m", "--model", default=DEFAULT_MODEL, help="Model name.", show_default=True)
+@click.option("-m", "--model", default=None, help="Model name (default: from settings or anthropic/claude-sonnet-4-20250514).")
 @click.option("--system", default="", help="System prompt override.")
 @click.option(
     "--provider",
-    default="openrouter",
-    help="LLM provider (openrouter/anthropic/openai/together/groq).",
-    show_default=True,
+    default=None,
+    help="LLM provider (openrouter/anthropic/openai/together/groq/custom).",
 )
 @click.option(
-    "--api-key", default=None, help="API key (default: $OPENROUTER_API_KEY or $ANTHROPIC_API_KEY)."
+    "--api-key", default=None, help="API key (default: env var or settings.json)."
+)
+@click.option(
+    "--base-url", default=None, help="API base URL for custom OpenAI-compatible providers."
 )
 def main(
     prompt: str | None,
-    model: str,
+    model: str | None,
     system: str,
-    provider: str,
+    provider: str | None,
     api_key: str | None,
+    base_url: str | None,
 ) -> None:
     """nanocc — Python Nano Claude Code."""
-    env_keys = {
-        "openrouter": "OPENROUTER_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-        "openai": "OPENAI_API_KEY",
-        "together": "TOGETHER_API_KEY",
-        "groq": "GROQ_API_KEY",
-    }
+    cwd = os.getcwd()
+    cfg = resolve_provider_config(
+        cli_model=model,
+        cli_provider=provider,
+        cli_api_key=api_key,
+        cli_base_url=base_url,
+        cwd=cwd,
+    )
 
-    if not api_key:
-        env_var = env_keys.get(provider, "OPENAI_API_KEY")
-        api_key = os.environ.get(env_var)
-
-    if not api_key:
+    if not cfg.api_key:
         console.print(
-            f"[red]Error: Set {env_keys.get(provider, 'OPENAI_API_KEY')} or pass --api-key.[/red]"
+            "[red]Error: No API key found. Set it via --api-key, env var, or ~/.nanocc/settings.json.[/red]"
         )
         sys.exit(1)
 
     if prompt:
-        asyncio.run(run_query(prompt, model, system, provider, api_key))
+        asyncio.run(run_query(cfg.model, system, cfg.provider, cfg.api_key, prompt, cfg.api_base_url))
     else:
-        asyncio.run(repl(model, system, provider, api_key))
+        asyncio.run(repl(cfg.model, system, cfg.provider, cfg.api_key, cfg.api_base_url))
 
 
 if __name__ == "__main__":

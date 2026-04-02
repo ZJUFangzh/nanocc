@@ -204,19 +204,42 @@ uv run nanocc -p "List all .py files and count lines" --api-key $KEY -m moonshot
 
 ---
 
+## 链路修复 ✅ (2026-04-03)
+
+**目标**: 审查 structure.md，修复所有已实现但未接通的跨模块链路，补全测试。
+
+**修复项 (9 项)**:
+
+| # | 修复 | 涉及文件 |
+|---|---|---|
+| 1 | Hooks 接入 query loop（tool_start/tool_complete/stop） | `query.py`, `tools/orchestration.py` |
+| 2 | Assistant tick 分支（end_turn 后等 tick/user_message） | `query.py`, `types.py`, `messages.py` |
+| 3 | Engine restore_state + extract_memories | `engine.py`, `messages.py` |
+| 4 | BriefTool + SleepTool 注册到 registry | `tools/registry.py` |
+| 5 | session_memory 补到 10 个 section | `memory/session_memory.py` |
+| 6 | Skill fork 模式（execute_skill + fork_agent） | `skills/executor.py` |
+| 7 | coordinator serial subtasks + TerminalReason 修复 | `agents/coordinator.py` |
+| 8 | auto_dream Phase 2/3 填充（transcript 扫描 + LLM consolidate） | `memory/auto_dream.py` |
+| 9 | MCP HTTP/SSE transport + list_resources/read_resource | `mcp/client.py` |
+
+**测试套件新增**: 15 个测试文件，153 个测试用例，全部 PASS（0.34s），无需 API key。
+
+---
+
 ## 当前统计
 
 | 指标 | 值 |
 |---|---|
-| 总代码行数 | ~5,524 |
+| 总代码行数 | ~6,200 |
 | 目标行数 | ~9,800 |
-| 完成 Phase | 7 / 10 |
-| Python 文件数 | 62 |
-| 核心工具数 | 10 (Bash, Read, Write, Edit, Glob, Grep, Agent, AskUser, WebFetch, Skill) |
+| 完成 Phase | 7 / 10 + 链路修复 |
+| Python 文件数 | 77 (含 15 个测试) |
+| 核心工具数 | 12 (Bash, Read, Write, Edit, Glob, Grep, Agent, AskUser, WebFetch, Skill, Brief, Sleep) |
 | 支持的 Provider | 5 (openrouter, anthropic, openai, together, groq) |
 | Compact 层数 | 3 (budget + micro + auto) |
 | 记忆模块 | 6 (memdir, session_memory, claude_md, extract, auto_dream, daily_log) |
-| MCP 集成 | ✅ (client + config + tool_wrapper) |
+| MCP transport | 3 (stdio, http, sse) |
+| 测试用例 | 153 |
 
 ---
 

@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
+
+if TYPE_CHECKING:
+    from nanocc.engine import QueryEngine
 
 COMMANDS = {
     "/exit": "Exit nanocc",
     "/quit": "Exit nanocc",
     "/clear": "Clear conversation history",
     "/compact": "Trigger manual compact",
-    "/model": "Show current model",
+    "/model": "Show or switch current model",
     "/cost": "Show token usage and cost",
     "/help": "Show available commands",
 }
@@ -23,8 +26,7 @@ def handle_command(
     cmd: str,
     *,
     console: Console,
-    all_messages: list[Any],
-    model: str,
+    engine: QueryEngine,
     total_tokens: int,
     total_cost: float,
 ) -> str | None:
@@ -43,7 +45,7 @@ def handle_command(
         return "exit"
 
     if command == "/clear":
-        all_messages.clear()
+        engine.messages.clear()
         console.print("[dim]Conversation cleared.[/dim]\n")
         return "handled"
 
@@ -52,7 +54,13 @@ def handle_command(
         return "handled"
 
     if command == "/model":
-        console.print(f"[dim]Model: {model}[/dim]")
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        if not arg:
+            console.print(f"[dim]Model: {engine.config.model}[/dim]")
+            console.print("[dim]Usage: /model <model-name> to switch[/dim]")
+        else:
+            engine.config.model = arg
+            console.print(f"[dim]Switched to: {arg}[/dim]")
         return "handled"
 
     if command == "/cost":

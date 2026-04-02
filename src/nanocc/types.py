@@ -117,6 +117,8 @@ class StreamEvent:
     # For content_block_start
     index: int = 0
     content_block: ContentBlock | None = None
+    block_type: str = ""  # "text", "tool_use", "thinking"
+    tool_name: str = ""   # tool name when block_type == "tool_use"
     # For content_block_delta
     delta: dict[str, Any] | None = None
     # For message_start / message_delta
@@ -212,6 +214,8 @@ class QueryParams:
     max_turns: int = 0  # 0 = unlimited
     max_tokens: int = 16_384
     tool_use_context: ToolUseContext | None = None
+    assistant_mode: bool = False
+    proactive_engine: Any = None  # ProactiveEngine, forward ref
 
 
 @dataclass

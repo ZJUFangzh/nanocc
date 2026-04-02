@@ -15,7 +15,7 @@ from nanocc.agents.fork import fork_agent
 from nanocc.messages import get_text_content
 from nanocc.providers.base import LLMProvider
 from nanocc.tools.base import BaseTool
-from nanocc.types import AssistantMessage, Terminal
+from nanocc.types import AssistantMessage, Terminal, TerminalReason
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ async def run_parallel_subtasks(
                     if text:
                         collected_text = text
                 elif isinstance(event, Terminal):
-                    if event.reason == Terminal.MODEL_ERROR:
+                    if event.reason == TerminalReason.MODEL_ERROR:
                         success = False
 
             return SubtaskResult(
@@ -71,5 +71,45 @@ async def run_parallel_subtasks(
     for task in asyncio.as_completed(tasks):
         result = await task
         results.append(result)
+
+    return results
+
+
+async def run_serial_subtasks(
+    subtasks: list[str],
+    provider: LLMProvider,
+    model: str,
+    system_prompt: str | list[dict[str, Any]],
+    tools: list[BaseTool],
+    cwd: str = ".",
+) -> list[SubtaskResult]:
+    """Run subtasks sequentially — for write operations that must not overlap."""
+    results: list[SubtaskResult] = []
+
+    for prompt in subtasks:
+        collected_text = ""
+        success = True
+        async for event in fork_agent(
+            prompt=prompt,
+            provider=provider,
+            model=model,
+            system_prompt=system_prompt,
+            tools=tools,
+            cwd=cwd,
+            max_turns=5,
+        ):
+            if isinstance(event, AssistantMessage):
+                text = get_text_content(event)
+                if text:
+                    collected_text = text
+            elif isinstance(event, Terminal):
+                if event.reason == TerminalReason.MODEL_ERROR:
+                    success = False
+
+        results.append(SubtaskResult(
+            prompt=prompt,
+            response=collected_text,
+            success=success,
+        ))
 
     return results

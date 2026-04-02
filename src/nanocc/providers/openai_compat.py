@@ -45,12 +45,17 @@ class OpenAICompatProvider:
         # Convert Anthropic-style system prompt to OpenAI messages
         oai_messages: list[dict[str, Any]] = []
         if system_prompt:
-            sys_text = ""
+            parts: list[str] = []
             for block in system_prompt:
                 if isinstance(block, dict):
-                    sys_text += block.get("text", "")
+                    text = block.get("text", "")
                 elif isinstance(block, str):
-                    sys_text += block
+                    text = block
+                else:
+                    text = ""
+                if text:
+                    parts.append(text)
+            sys_text = "\n\n".join(parts)
             if sys_text:
                 oai_messages.append({"role": "system", "content": sys_text})
 
@@ -67,6 +72,7 @@ class OpenAICompatProvider:
             "messages": oai_messages,
             "max_tokens": max_tokens,
             "stream": True,
+            "stream_options": {"include_usage": True},
         }
 
         if stop_sequences:
@@ -92,6 +98,7 @@ class OpenAICompatProvider:
 
         input_tokens = 0
         output_tokens = 0
+        stop_reason: str | None = None
         current_tool_index: int | None = None
 
         response = await self._client.chat.completions.create(**params)
@@ -160,14 +167,22 @@ class OpenAICompatProvider:
                     "tool_calls": "tool_use",
                 }.get(choice.finish_reason, choice.finish_reason)
 
-                yield ProviderEvent(
-                    type=ProviderEventType.MESSAGE_DELTA,
-                    stop_reason=stop_reason,
-                    usage=MessageUsage(
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                    ),
-                )
+                # Also check usage on this chunk (some providers include it here)
+                if chunk.usage:
+                    input_tokens = chunk.usage.prompt_tokens or 0
+                    output_tokens = chunk.usage.completion_tokens or 0
+
+        # Yield MESSAGE_DELTA after the loop so usage-only chunks
+        # that arrive after finish_reason are captured.
+        if stop_reason:
+            yield ProviderEvent(
+                type=ProviderEventType.MESSAGE_DELTA,
+                stop_reason=stop_reason,
+                usage=MessageUsage(
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                ),
+            )
 
         yield ProviderEvent(type=ProviderEventType.MESSAGE_STOP)
 

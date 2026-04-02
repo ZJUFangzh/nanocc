@@ -20,9 +20,10 @@ from typing import Any
 from nanocc.compact.auto_compact import AutoCompactTracking, auto_compact_if_needed
 from nanocc.compact.micro_compact import micro_compact
 from nanocc.compact.tool_result_budget import apply_tool_result_budget
-from nanocc.messages import create_assistant_message, create_user_message_with_blocks, to_api_messages, to_api_system_prompt
+from nanocc.messages import create_assistant_message, create_tick_message, create_user_message_with_blocks, to_api_messages, to_api_system_prompt
 from nanocc.tools.orchestration import run_tools
 from nanocc.providers.base import LLMProvider, ProviderEvent, ProviderEventType
+from nanocc.hooks.types import HookEvent
 from nanocc.types import (
     AssistantMessage,
     ContentBlock,
@@ -177,17 +178,36 @@ async def query(
         ]
 
         if not tool_use_blocks:
+            # Fire stop hook before completing
+            if state.hook_engine:
+                await state.hook_engine.fire(HookEvent.STOP)
+
+            # Assistant mode: wait for tick or new user input instead of returning
+            if params.assistant_mode and params.proactive_engine:
+                from nanocc.assistant.proactive import WakeReason
+                wake = await params.proactive_engine.wait_for_next()
+                if wake.reason == WakeReason.TICK:
+                    state.messages.append(create_tick_message())
+                    continue
+                elif wake.reason == WakeReason.USER_MESSAGE:
+                    state.messages.append(wake.data)
+                    continue
+                # WakeReason.SHUTDOWN → fall through to return
+
             yield Terminal(reason=TerminalReason.COMPLETED)
             return
 
         if not params.tools:
             # Model tried to use tools but none are available
+            if state.hook_engine:
+                await state.hook_engine.fire(HookEvent.STOP)
             yield Terminal(reason=TerminalReason.COMPLETED)
             return
 
-        # Execute tools (concurrent reads, serial writes)
+        # Execute tools (concurrent reads, serial writes) with hook engine
         tool_results = await run_tools(
-            tool_use_blocks, params.tools, state.tool_use_context
+            tool_use_blocks, params.tools, state.tool_use_context,
+            hook_engine=state.hook_engine,
         )
 
         # Yield each result for UI rendering
@@ -225,6 +245,8 @@ def _provider_to_stream_event(event: ProviderEvent) -> StreamEvent | None:
     return StreamEvent(
         type=stream_type,
         index=event.index,
+        block_type=event.block_type,
+        tool_name=event.tool_name,
         usage=event.usage,
         stop_reason=event.stop_reason,
         delta={"text": event.text} if event.text else None,

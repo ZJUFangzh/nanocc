@@ -65,6 +65,7 @@ async def execute_single_tool(
     block: ToolUseBlock,
     tools: list[BaseTool],
     context: ToolUseContext,
+    hook_engine: Any = None,
 ) -> ToolResultBlock:
     """Execute a single tool call and return a ToolResultBlock."""
     tool = find_tool(tools, block.name)
@@ -95,6 +96,11 @@ async def execute_single_tool(
             is_error=True,
         )
 
+    # Fire tool_start hook
+    if hook_engine:
+        from nanocc.hooks.types import HookEvent
+        await hook_engine.fire(HookEvent.TOOL_START, tool_name=block.name, tool_input=block.input)
+
     # Execute
     try:
         result = await tool.execute(block.input, context)
@@ -102,24 +108,37 @@ async def execute_single_tool(
         if isinstance(content, list):
             import json
             content = json.dumps(content)
-        return ToolResultBlock(
+        result_block = ToolResultBlock(
             tool_use_id=block.id,
             content=content,
             is_error=result.is_error,
         )
     except Exception as e:
         logger.error("Tool execution error for %s: %s", block.name, e)
-        return ToolResultBlock(
+        result_block = ToolResultBlock(
             tool_use_id=block.id,
             content=f"Error: {e}",
             is_error=True,
         )
+        # Fire tool_error hook
+        if hook_engine:
+            from nanocc.hooks.types import HookEvent
+            await hook_engine.fire(HookEvent.TOOL_ERROR, tool_name=block.name, tool_input=block.input)
+        return result_block
+
+    # Fire tool_complete hook
+    if hook_engine:
+        from nanocc.hooks.types import HookEvent
+        await hook_engine.fire(HookEvent.TOOL_COMPLETE, tool_name=block.name, tool_input=block.input, result=result_block)
+
+    return result_block
 
 
 async def run_tools(
     blocks: list[ToolUseBlock],
     tools: list[BaseTool],
     context: ToolUseContext,
+    hook_engine: Any = None,
 ) -> list[ToolResultBlock]:
     """Execute tool calls with proper concurrency.
 
@@ -135,7 +154,7 @@ async def run_tools(
 
             async def run_with_sem(b: ToolUseBlock) -> tuple[str, ToolResultBlock]:
                 async with sem:
-                    r = await execute_single_tool(b, tools, context)
+                    r = await execute_single_tool(b, tools, context, hook_engine)
                     return b.id, r
 
             tasks = [run_with_sem(b) for b in batch.blocks]
@@ -145,7 +164,7 @@ async def run_tools(
         else:
             # Run serially
             for block in batch.blocks:
-                result = await execute_single_tool(block, tools, context)
+                result = await execute_single_tool(block, tools, context, hook_engine)
                 results[block.id] = result
 
     # Return in original order

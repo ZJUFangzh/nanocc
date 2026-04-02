@@ -1,7 +1,6 @@
 """Session memory — structured working notes that survive compact.
 
-Fixed sections: Current State, Task, Files, Errors, Worklog.
-Triggers: 10K token init, 5K token increment, 3+ tool calls.
+Fixed 10 sections. Triggers: 10K token init, 5K token increment, 3+ tool calls.
 Updated via LLM side-query after significant work.
 """
 
@@ -25,6 +24,10 @@ SECTIONS = [
     "Key Files",
     "Recent Changes",
     "Errors Encountered",
+    "Open Questions",
+    "Dependencies",
+    "Decisions Made",
+    "Next Steps",
     "Worklog",
 ]
 

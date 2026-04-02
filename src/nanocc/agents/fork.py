@@ -55,6 +55,10 @@ async def fork_agent(
         tools=tools,
         model=model,
         abort_controller=abort,
+        options={
+            "provider": provider,
+            "system_prompt": system_prompt,
+        },
     )
 
     params = QueryParams(

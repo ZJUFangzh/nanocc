@@ -42,9 +42,15 @@ class MCPClient:
         self._writer: asyncio.StreamWriter | None = None
 
     async def connect(self) -> bool:
-        """Connect to the MCP server via stdio transport."""
-        if self.config.transport != "stdio" or not self.config.command:
-            logger.warning("Only stdio transport supported currently for %s", self.server_name)
+        """Connect to the MCP server."""
+        transport = self.config.transport or "stdio"
+
+        if transport == "http":
+            return await self._connect_http()
+        elif transport == "sse":
+            return await self._connect_sse()
+        elif transport != "stdio" or not self.config.command:
+            logger.warning("Unsupported transport '%s' for %s", transport, self.server_name)
             return False
 
         try:
@@ -86,6 +92,11 @@ class MCPClient:
             return False
 
     async def disconnect(self) -> None:
+        if hasattr(self, '_http_client'):
+            await self._http_client.aclose()
+            self._connected = False
+            return
+
         if self._process:
             self._process.terminate()
             try:
@@ -120,6 +131,10 @@ class MCPClient:
 
     async def _send_request(self, method: str, params: dict) -> dict | None:
         """Send a JSON-RPC request and wait for response."""
+        # Use HTTP if connected via HTTP/SSE transport
+        if hasattr(self, '_http_client'):
+            return await self._http_request(method, params)
+
         if not self._process or not self._process.stdin or not self._process.stdout:
             return None
 
@@ -148,7 +163,152 @@ class MCPClient:
 
         return None
 
+    async def list_resources(self) -> list[MCPResource]:
+        """List resources from the MCP server."""
+        if not self._connected:
+            return []
+
+        if self._resources:
+            return self._resources
+
+        resp = await self._send_request("resources/list", {})
+        if resp and "resources" in resp:
+            for r in resp["resources"]:
+                self._resources.append(MCPResource(
+                    uri=r.get("uri", ""),
+                    name=r.get("name", ""),
+                    description=r.get("description", ""),
+                ))
+
+        return self._resources
+
+    async def read_resource(self, uri: str) -> str:
+        """Read a resource by URI."""
+        if not self._connected:
+            return "Error: Not connected to MCP server"
+
+        resp = await self._send_request("resources/read", {"uri": uri})
+        if not resp:
+            return "Error: No response from MCP server"
+
+        contents = resp.get("contents", [])
+        parts = []
+        for item in contents:
+            if isinstance(item, dict):
+                text = item.get("text", "")
+                if text:
+                    parts.append(text)
+        return "\n".join(parts) if parts else json.dumps(resp)
+
+    async def _connect_http(self) -> bool:
+        """Connect via HTTP transport (JSON-RPC over HTTP POST)."""
+        if not self.config.url:
+            logger.error("MCP %s: HTTP transport requires url", self.server_name)
+            return False
+
+        try:
+            import httpx
+            self._http_client = httpx.AsyncClient(timeout=30)
+            self._http_url = self.config.url
+
+            # Initialize
+            resp = await self._http_request("initialize", {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "nanocc", "version": "0.1.0"},
+            })
+            if resp:
+                await self._http_request("notifications/initialized", {}, is_notification=True)
+                self._connected = True
+
+                # Discover tools
+                tools_resp = await self._http_request("tools/list", {})
+                if tools_resp and "tools" in tools_resp:
+                    for t in tools_resp["tools"]:
+                        self._tools.append(MCPToolSchema(
+                            name=t.get("name", ""),
+                            description=t.get("description", ""),
+                            input_schema=t.get("inputSchema", {}),
+                        ))
+
+                logger.info("MCP %s (HTTP): connected, %d tools", self.server_name, len(self._tools))
+                return True
+
+        except Exception as e:
+            logger.error("MCP %s HTTP connect failed: %s", self.server_name, e)
+        return False
+
+    async def _connect_sse(self) -> bool:
+        """Connect via SSE transport (Server-Sent Events)."""
+        if not self.config.url:
+            logger.error("MCP %s: SSE transport requires url", self.server_name)
+            return False
+
+        try:
+            import httpx
+
+            # SSE: first GET to establish endpoint, then POST for messages
+            self._http_client = httpx.AsyncClient(timeout=60)
+            self._http_url = self.config.url
+
+            # For SSE, the server sends events and we POST requests
+            # Use the /message endpoint convention
+            base = self.config.url.rstrip("/")
+            self._http_url = f"{base}/message"
+
+            resp = await self._http_request("initialize", {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "nanocc", "version": "0.1.0"},
+            })
+            if resp:
+                await self._http_request("notifications/initialized", {}, is_notification=True)
+                self._connected = True
+
+                tools_resp = await self._http_request("tools/list", {})
+                if tools_resp and "tools" in tools_resp:
+                    for t in tools_resp["tools"]:
+                        self._tools.append(MCPToolSchema(
+                            name=t.get("name", ""),
+                            description=t.get("description", ""),
+                            input_schema=t.get("inputSchema", {}),
+                        ))
+
+                logger.info("MCP %s (SSE): connected, %d tools", self.server_name, len(self._tools))
+                return True
+
+        except Exception as e:
+            logger.error("MCP %s SSE connect failed: %s", self.server_name, e)
+        return False
+
+    async def _http_request(
+        self, method: str, params: dict, *, is_notification: bool = False,
+    ) -> dict | None:
+        """Send a JSON-RPC request over HTTP."""
+        if not hasattr(self, '_http_client') or not hasattr(self, '_http_url'):
+            return None
+
+        payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method, "params": params}
+        if not is_notification:
+            self._request_id += 1
+            payload["id"] = self._request_id
+
+        try:
+            resp = await self._http_client.post(self._http_url, json=payload)
+            if is_notification:
+                return {}
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("result")
+        except Exception as e:
+            logger.error("MCP %s HTTP request error: %s", self.server_name, e)
+        return None
+
     async def _send_notification(self, method: str, params: dict) -> None:
+        if hasattr(self, '_http_client'):
+            await self._http_request(method, params, is_notification=True)
+            return
+
         if not self._process or not self._process.stdin:
             return
         notif = {"jsonrpc": "2.0", "method": method, "params": params}

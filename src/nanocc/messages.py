@@ -57,6 +57,13 @@ def create_system_message(
     return SystemMessage(subtype=subtype, text=text)
 
 
+def create_tick_message() -> UserMessage:
+    """Create a tick message for assistant mode proactive wake."""
+    return UserMessage(content="<tick>You have been woken up by a periodic tick. "
+        "Check if there's anything useful you can do proactively. "
+        "If not, call the Sleep tool.</tick>")
+
+
 # ── API Format Conversion ──────────────────────────────────────────────────
 
 
@@ -135,6 +142,75 @@ def to_api_system_prompt(
     if enable_cache:
         block["cache_control"] = {"type": "ephemeral"}
     return [block]
+
+
+# ── API Message Deserialization ────────────────────────────────────────────
+
+
+def from_api_message(api_msg: dict[str, Any]) -> Message | None:
+    """Convert an Anthropic API message dict back to internal Message type."""
+    role = api_msg.get("role")
+    content = api_msg.get("content")
+
+    if role == "user":
+        if isinstance(content, str):
+            return UserMessage(content=content)
+        # List of content blocks
+        blocks: list[Any] = []
+        for block in content or []:
+            if isinstance(block, dict):
+                btype = block.get("type")
+                if btype == "text":
+                    blocks.append(TextBlock(text=block.get("text", "")))
+                elif btype == "tool_result":
+                    blocks.append(ToolResultBlock(
+                        tool_use_id=block.get("tool_use_id", ""),
+                        content=block.get("content", ""),
+                        is_error=block.get("is_error", False),
+                    ))
+                else:
+                    blocks.append(block)
+            else:
+                blocks.append(block)
+        return UserMessage(content=blocks)
+
+    elif role == "assistant":
+        blocks = []
+        for block in content or []:
+            if isinstance(block, dict):
+                btype = block.get("type")
+                if btype == "text":
+                    blocks.append(TextBlock(text=block.get("text", "")))
+                elif btype == "tool_use":
+                    blocks.append(ToolUseBlock(
+                        id=block.get("id", ""),
+                        name=block.get("name", ""),
+                        input=block.get("input", {}),
+                    ))
+                elif btype == "thinking":
+                    blocks.append(ThinkingBlock(
+                        thinking=block.get("thinking", ""),
+                        signature=block.get("signature", ""),
+                    ))
+                elif btype == "redacted_thinking":
+                    blocks.append(RedactedThinkingBlock(data=block.get("data", "")))
+                else:
+                    blocks.append(block)
+            else:
+                blocks.append(block)
+        return AssistantMessage(content=blocks)
+
+    return None
+
+
+def from_api_messages(api_msgs: list[dict[str, Any]]) -> list[Message]:
+    """Convert a list of API messages back to internal Message types."""
+    messages: list[Message] = []
+    for api_msg in api_msgs:
+        msg = from_api_message(api_msg)
+        if msg is not None:
+            messages.append(msg)
+    return messages
 
 
 # ── Message Utilities ───────────────────────────────────────────────────────

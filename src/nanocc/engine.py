@@ -23,7 +23,8 @@ from nanocc.context import build_system_prompt, system_prompt_to_text
 from nanocc.memory.claude_md import load_claude_md
 from nanocc.memory.memdir import build_memory_prompt
 from nanocc.memory.session_memory import SessionMemory
-from nanocc.messages import create_user_message, to_api_messages
+from nanocc.memory.extract import build_extract_prompt, parse_extract_response
+from nanocc.messages import create_user_message, from_api_messages, to_api_messages
 from nanocc.providers.base import LLMProvider
 from nanocc.query import query
 from nanocc.tools.base import BaseTool
@@ -103,6 +104,10 @@ class QueryEngine:
             messages=self.messages,
             model=self.config.model,
             abort_controller=self._abort,
+            options={
+                "provider": self.config.provider,
+                "system_prompt": self.config.system_prompt,
+            },
         )
 
         params = QueryParams(
@@ -115,6 +120,8 @@ class QueryEngine:
             max_turns=self.config.max_turns,
             max_tokens=self.config.max_tokens,
             tool_use_context=tool_context,
+            assistant_mode=self.config.assistant_mode,
+            proactive_engine=getattr(self, 'proactive_engine', None),
         )
 
         # Track tool calls for session memory
@@ -144,8 +151,13 @@ class QueryEngine:
         current_tokens = token_count_with_estimation(self.messages)
         if self.session_memory.should_update(current_tokens, tool_calls_this_turn):
             logger.debug("Session memory update triggered")
-            # Would call LLM to update — for now just note it
             self.session_memory.tool_calls_since_update = 0
+
+        # Post-turn: extract memories (background, fire-and-forget)
+        import asyncio
+        extract_prompt = build_extract_prompt(self.messages)
+        if extract_prompt:
+            asyncio.create_task(self._run_extract(extract_prompt))
 
     def abort(self) -> None:
         """Abort the current query."""
@@ -201,3 +213,61 @@ class QueryEngine:
             },
             "session_memory": self.session_memory.content,
         }
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        """Restore engine state from a serialized dict (for --continue)."""
+        # Restore messages
+        api_msgs = state.get("messages", [])
+        self.messages = from_api_messages(api_msgs)
+
+        # Restore usage
+        usage_data = state.get("usage", {})
+        self.usage.total_input_tokens = usage_data.get("input", 0)
+        self.usage.total_output_tokens = usage_data.get("output", 0)
+        self.usage.api_calls = usage_data.get("api_calls", 0)
+
+        # Restore session memory
+        sm_content = state.get("session_memory", "")
+        if sm_content:
+            self.session_memory.content = sm_content
+            self.session_memory.initialized = True
+
+        # Restore cwd
+        if state.get("cwd"):
+            self.cwd = state["cwd"]
+
+        # Restore session id
+        if state.get("session_id"):
+            self.session_id = state["session_id"]
+
+        logger.info("Engine state restored: session=%s, %d messages",
+                     self.session_id, len(self.messages))
+
+    async def _run_extract(self, prompt: str) -> None:
+        """Background memory extraction via LLM side-query."""
+        try:
+            # Use a non-streaming single-shot call to the provider
+            from nanocc.messages import to_api_system_prompt
+            response_text = ""
+            async for event in self.config.provider.stream(
+                messages=[{"role": "user", "content": prompt}],
+                system_prompt=to_api_system_prompt("You are a memory extraction assistant."),
+                tools=[],
+                model=self.config.model,
+                max_tokens=1024,
+            ):
+                if event.text:
+                    response_text += event.text
+
+            result = parse_extract_response(response_text)
+            if result:
+                from nanocc.utils.config import get_memory_dir
+                memory_dir = get_memory_dir(self.cwd)
+                # Write memory file
+                filename = f"{result['type']}_{result['name'].replace(' ', '_').lower()}.md"
+                filepath = memory_dir / filename
+                content = f"---\nname: {result['name']}\ndescription: {result['description']}\ntype: {result['type']}\n---\n\n{result['content']}"
+                filepath.write_text(content, encoding="utf-8")
+                logger.info("Extracted memory: %s -> %s", result['name'], filename)
+        except Exception as e:
+            logger.debug("Memory extraction failed (non-critical): %s", e)
