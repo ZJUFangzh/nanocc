@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">nanocc</h1>
   <p align="center">
-    <b>Python Nano Claude Code</b> — 基于 <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> 2.1.88 的 Python 精简复刻（~10,000 行）
+    <b>Python Nano Claude Code</b> — 基于 <a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code</a> 的 Python 精简复刻（~10,000 行）
   </p>
   <p align="center">
     CLI 日常使用 &nbsp;|&nbsp; Agent SDK 构建代理 &nbsp;|&nbsp; IM 通道对接
