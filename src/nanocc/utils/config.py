@@ -83,8 +83,6 @@ _ENV_KEYS: dict[str, str] = {
     "openrouter": "OPENROUTER_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "openai": "OPENAI_API_KEY",
-    "together": "TOGETHER_API_KEY",
-    "groq": "GROQ_API_KEY",
 }
 
 

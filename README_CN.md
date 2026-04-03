@@ -117,8 +117,6 @@ uv tool install -e .    # 安装到 ~/.local/bin/nanocc
 | `openrouter`（默认）| `OPENROUTER_API_KEY` | `provider/model` | 模型覆盖最广 |
 | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-20250514` | 原生 SDK |
 | `openai` | `OPENAI_API_KEY` | `gpt-4o` | |
-| `together` | `TOGETHER_API_KEY` | `meta-llama/...` | |
-| `groq` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | |
 | `custom` | — | 任意 | 需配 `apiBaseUrl` |
 
 优先级：`/model` 会话覆盖 > CLI 标志 > 环境变量 > `settings.json` > 内置默认值
@@ -369,7 +367,7 @@ uv run python -c "import nanocc"
 | 目标行数 | ~10,000 |
 | 已完成 Phase | 7 / 10 + 链路修复 |
 | 内置工具 | 12 |
-| Provider | 5 + custom |
+| Provider | 3 + custom |
 | Compact 层数 | 3 |
 | 记忆模块 | 6 |
 | MCP 传输协议 | 3 |

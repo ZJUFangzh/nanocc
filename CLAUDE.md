@@ -44,8 +44,8 @@ Provider/Model/API Key 通过 `~/.nanocc/settings.json`（全局）或 `.nanocc/
 
 优先级：`/model` 会话覆盖 > CLI 标志 > 环境变量 > settings.json > 内置默认值
 
-已知 provider：`openrouter`、`anthropic`、`openai`、`together`、`groq`（自动匹配 baseUrl）。
-其他名字走 OpenAI 兼容，需配 `apiBaseUrl`。
+已知 provider：`openrouter`、`anthropic`、`openai`（自动匹配 baseUrl）。
+其他名字走 OpenAI 兼容（`custom`），需配 `apiBaseUrl`。
 
 ## 常用命令
 

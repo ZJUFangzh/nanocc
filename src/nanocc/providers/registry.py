@@ -9,8 +9,6 @@ from nanocc.providers.base import LLMProvider
 # Well-known OpenAI-compatible base URLs
 _OPENAI_COMPAT_URLS: dict[str, str] = {
     "openrouter": "https://openrouter.ai/api/v1",
-    "together": "https://api.together.xyz/v1",
-    "groq": "https://api.groq.com/openai/v1",
 }
 
 
@@ -18,7 +16,7 @@ def create_provider(name: str = "openai", **kwargs: Any) -> LLMProvider:
     """Create an LLM provider by name.
 
     Args:
-        name: "anthropic", "openai", "openrouter", "together", "groq",
+        name: "anthropic", "openai", "openrouter",
               or any OpenAI-compatible provider with base_url.
         **kwargs: Provider-specific arguments (api_key, base_url, etc.).
     """

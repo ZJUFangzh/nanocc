@@ -72,6 +72,17 @@ Create `~/.nanocc/settings.json`:
 }
 ```
 
+For any OpenAI-compatible API:
+
+```json
+{
+  "provider": "custom",
+  "apiBaseUrl": "https://my-api.com/v1",
+  "model": "my-model",
+  "apiKey": "..."
+}
+```
+
 ### Run
 
 ```bash
@@ -106,8 +117,6 @@ uv tool install -e .    # installs to ~/.local/bin/nanocc
 | `openrouter` (default) | `OPENROUTER_API_KEY` | `provider/model` | Widest model coverage |
 | `anthropic` | `ANTHROPIC_API_KEY` | `claude-sonnet-4-20250514` | Native SDK |
 | `openai` | `OPENAI_API_KEY` | `gpt-4o` | |
-| `together` | `TOGETHER_API_KEY` | `meta-llama/...` | |
-| `groq` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | |
 | `custom` | — | any | Set `apiBaseUrl` in settings |
 
 Config priority: `/model` session override > CLI flags > env variables > `settings.json` > built-in defaults.
@@ -358,7 +367,7 @@ uv run python -c "import nanocc"
 | Target | ~10,000 |
 | Phases completed | 7 / 10 + integration fixes |
 | Built-in tools | 12 |
-| Providers | 5 + custom |
+| Providers | 3 + custom |
 | Compact layers | 3 |
 | Memory modules | 6 |
 | MCP transports | 3 |

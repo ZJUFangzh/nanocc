@@ -397,7 +397,7 @@ async def repl(
 @click.option(
     "--provider",
     default=None,
-    help="LLM provider (openrouter/anthropic/openai/together/groq/custom).",
+    help="LLM provider (openrouter/anthropic/openai/custom).",
 )
 @click.option(
     "--api-key", default=None, help="API key (default: env var or settings.json)."
