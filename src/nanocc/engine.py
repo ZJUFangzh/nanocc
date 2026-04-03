@@ -24,7 +24,12 @@ from nanocc.memory.claude_md import load_claude_md
 from nanocc.memory.memdir import build_memory_prompt
 from nanocc.memory.session_memory import SessionMemory
 from nanocc.memory.extract import build_extract_prompt, parse_extract_response
-from nanocc.messages import create_user_message, from_api_messages, to_api_messages
+from nanocc.messages import (
+    create_user_message,
+    from_api_messages,
+    to_api_messages,
+    to_transcript_messages,
+)
 from nanocc.providers.base import LLMProvider
 from nanocc.query import query
 from nanocc.tools.base import BaseTool
@@ -75,6 +80,7 @@ class QueryEngine:
         self.session_memory = SessionMemory()
         self.compact_tracking = AutoCompactTracking()
         self._abort: AbortController | None = None
+        self._last_saved_index: int = 0
 
     async def submit_message(
         self, prompt: str | list[Any],
@@ -200,12 +206,15 @@ class QueryEngine:
         )
 
     def get_state(self) -> dict[str, Any]:
-        """Serialize engine state for session persistence."""
+        """Serialize engine state for session persistence.
+
+        Uses transcript format (includes SystemMessage) so compact boundaries survive.
+        """
         return {
             "session_id": self.session_id,
             "cwd": self.cwd,
             "model": self.config.model,
-            "messages": to_api_messages(self.messages),
+            "messages": to_transcript_messages(self.messages),
             "usage": {
                 "input": self.usage.total_input_tokens,
                 "output": self.usage.total_output_tokens,
@@ -216,7 +225,7 @@ class QueryEngine:
 
     def restore_state(self, state: dict[str, Any]) -> None:
         """Restore engine state from a serialized dict (for --continue)."""
-        # Restore messages
+        # Restore messages (from_api_messages now handles system role too)
         api_msgs = state.get("messages", [])
         self.messages = from_api_messages(api_msgs)
 
@@ -240,8 +249,41 @@ class QueryEngine:
         if state.get("session_id"):
             self.session_id = state["session_id"]
 
+        # Mark all restored messages as already saved
+        self._last_saved_index = len(self.messages)
+
         logger.info("Engine state restored: session=%s, %d messages",
                      self.session_id, len(self.messages))
+
+    def save_session(self) -> None:
+        """Persist session: incremental transcript append + state snapshot."""
+        from nanocc.utils.session_storage import (
+            append_messages,
+            save_meta,
+            save_session_state,
+        )
+
+        # Incremental transcript append
+        transcript_msgs = to_transcript_messages(self.messages)
+        self._last_saved_index = append_messages(
+            self.session_id, transcript_msgs, self._last_saved_index
+        )
+
+        # State snapshot
+        save_session_state(self.session_id, self.get_state())
+
+        # Metadata with last message preview
+        from nanocc.messages import get_text_content
+        last_msg = ""
+        if self.messages:
+            last_msg = get_text_content(self.messages[-1])
+        save_meta(
+            self.session_id,
+            message_count=len(self.messages),
+            cwd=self.cwd,
+            model=self.config.model,
+            last_message=last_msg,
+        )
 
     async def _run_extract(self, prompt: str) -> None:
         """Background memory extraction via LLM side-query."""

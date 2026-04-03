@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
 
 from nanocc.tools.base import BaseTool
@@ -11,7 +14,7 @@ from nanocc.tools.orchestration import (
     partition_tool_calls,
     run_tools,
 )
-from nanocc.types import ToolUseBlock
+from nanocc.types import ToolResult, ToolUseBlock, ToolUseContext
 
 
 # ── Registry ──
@@ -134,3 +137,65 @@ async def test_run_tools_with_hook_engine(basic_tools, tool_context, hook_engine
     results = await run_tools(blocks, basic_tools, tool_context, hook_engine=hook_engine)
     assert len(results) == 1
     assert not results[0].is_error
+
+
+# ── Concurrent execution (gather) ──
+
+class SlowTool(BaseTool):
+    """A tool that sleeps to simulate slow I/O (e.g. API calls)."""
+    name = "SlowTool"
+    description = "Sleeps for a bit"
+    is_read_only = True
+    input_schema = {"type": "object", "properties": {"delay": {"type": "number"}}}
+
+    async def execute(self, input, context):
+        await asyncio.sleep(input.get("delay", 0.1))
+        return ToolResult(content=f"slept {input.get('delay')}")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_tools_run_in_parallel():
+    """Two read-only tools should run concurrently via asyncio.gather, not serially."""
+    tools = [SlowTool()]
+    ctx = ToolUseContext(cwd=".", tools=tools, model="test")
+    blocks = [
+        ToolUseBlock(id="t1", name="SlowTool", input={"delay": 0.2}),
+        ToolUseBlock(id="t2", name="SlowTool", input={"delay": 0.2}),
+    ]
+    start = time.monotonic()
+    results = await run_tools(blocks, tools, ctx)
+    elapsed = time.monotonic() - start
+
+    assert len(results) == 2
+    assert not results[0].is_error
+    assert not results[1].is_error
+    # If run in parallel, total time should be ~0.2s, not ~0.4s
+    assert elapsed < 0.35, f"Expected parallel execution but took {elapsed:.2f}s"
+
+
+class FailingTool(BaseTool):
+    """A tool that raises an exception."""
+    name = "FailingTool"
+    description = "Always fails"
+    is_read_only = True
+    input_schema = {"type": "object", "properties": {}}
+
+    async def execute(self, input, context):
+        raise RuntimeError("boom")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_tools_one_failure_does_not_block_others():
+    """If one concurrent tool fails, the others should still complete."""
+    tools = [SlowTool(), FailingTool()]
+    ctx = ToolUseContext(cwd=".", tools=tools, model="test")
+    blocks = [
+        ToolUseBlock(id="t1", name="SlowTool", input={"delay": 0.05}),
+        ToolUseBlock(id="t2", name="FailingTool", input={}),
+    ]
+    results = await run_tools(blocks, tools, ctx)
+    assert len(results) == 2
+    assert not results[0].is_error
+    assert "slept" in results[0].content
+    # FailingTool should produce an error result, not crash the batch
+    assert results[1].is_error

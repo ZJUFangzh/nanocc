@@ -13,9 +13,9 @@
     &nbsp;
     <img src="https://img.shields.io/badge/python-%3E%3D3.11-blue" alt="Python">
     &nbsp;
-    <img src="https://img.shields.io/badge/tests-153%20passed-brightgreen" alt="Tests">
+    <img src="https://img.shields.io/badge/tests-176%20passed-brightgreen" alt="Tests">
     &nbsp;
-    <img src="https://img.shields.io/badge/lines-~7.6k%2F10k-orange" alt="Lines">
+    <img src="https://img.shields.io/badge/lines-~8.1k%2F10k-orange" alt="Lines">
   </p>
   <p align="center">
     <a href="README.md">English</a>
@@ -30,6 +30,7 @@
 
 ## News
 
+- **2026-04-03** — Session 持久化：增量 transcript append、compact boundary 感知恢复、`-c`/`--continue` 标志、`/resume` 命令、AgentTool 超时、工具并发异常处理。176 个测试。
 - **2026-04-03** — Phase 7 全部完成 + 链路修复：9 项跨模块集成修复，153 个测试全部通过。Hooks、Assistant/KAIROS 模式、子 Agent、MCP 全链路打通。
 - **2026-04-03** — Provider 配置重构：`settings.json` 持久化配置、REPL 内 `/model` 热切换、AgentTool 修复。
 - **2026-04-02** — 首次发布：一天内完成 Phase 1-7。核心 agent loop、12 个工具、三层压缩、记忆系统、hooks、skills、MCP、子 agent、assistant 模式全部就位。
@@ -46,6 +47,7 @@
 - **Hook 系统** — 5 种事件 × 3 种 hook 类型，工具执行前后自动触发
 - **Skill 插件** — 文件即插件，支持 fork 隔离执行
 - **MCP 集成** — stdio / HTTP / SSE 三种传输协议，工具 + 资源
+- **会话持久化** — 增量 transcript 保存、compact boundary 感知恢复、`-c` 续接、`/resume` 选择器
 - **子 Agent** — fork 隔离上下文 + coordinator 并行/串行任务协调
 - **Assistant / KAIROS 模式** — 长驻守护，周期性 tick 唤醒，结构化 Brief 输出
 
@@ -90,11 +92,15 @@ uv run nanocc -p "解释这个代码库"
 # 交互式 REPL
 uv run nanocc
 
+# 恢复上次会话
+uv run nanocc -c
+
 # CLI 标志覆盖
 uv run nanocc -m anthropic/claude-sonnet-4 --api-key $KEY
 
-# REPL 中切换模型
+# REPL 中切换模型 / 恢复会话
 > /model qwen/qwen3.5-flash-02-23
+> /resume
 ```
 
 ### 全局安装（可选）
@@ -339,7 +345,7 @@ src/nanocc/
 ├── cli/                  # CLI 入口（click + rich）
 └── utils/                # 工具模块（abort、tokens、git、config、cost）
 
-tests/                    # 153 个测试，mock provider，无需 API key
+tests/                    # 176 个测试，mock provider，无需 API key
 ```
 
 ## 开发
@@ -359,7 +365,7 @@ uv run python -c "import nanocc"
 
 | 指标 | 值 |
 |---|---|
-| 源码行数 | ~7,600 |
+| 源码行数 | ~8,100 |
 | 目标行数 | ~10,000 |
 | 已完成 Phase | 7 / 10 + 链路修复 |
 | 内置工具 | 12 |
@@ -367,7 +373,7 @@ uv run python -c "import nanocc"
 | Compact 层数 | 3 |
 | 记忆模块 | 6 |
 | MCP 传输协议 | 3 |
-| 测试用例 | 153 |
+| 测试用例 | 176 |
 
 详细的阶段进度见 [docs/progress.md](docs/progress.md)，完整架构规划见 [structure.md](structure.md)。
 

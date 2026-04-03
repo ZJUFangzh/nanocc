@@ -13,9 +13,9 @@
     &nbsp;
     <img src="https://img.shields.io/badge/python-%3E%3D3.11-blue" alt="Python">
     &nbsp;
-    <img src="https://img.shields.io/badge/tests-153%20passed-brightgreen" alt="Tests">
+    <img src="https://img.shields.io/badge/tests-176%20passed-brightgreen" alt="Tests">
     &nbsp;
-    <img src="https://img.shields.io/badge/lines-~7.6k%2F10k-orange" alt="Lines">
+    <img src="https://img.shields.io/badge/lines-~8.1k%2F10k-orange" alt="Lines">
   </p>
   <p align="center">
     <a href="README_CN.md">中文文档</a>
@@ -30,6 +30,7 @@
 
 ## News
 
+- **2026-04-03** — Session persistence: incremental transcript append, compact-boundary-aware restore, `-c`/`--continue` flag, `/resume` command, AgentTool timeout, tool concurrency error handling. 176 tests.
 - **2026-04-03** — Phase 7 complete + integration fixes: 9 cross-module link-ups, 153 tests all passing. Hooks, Assistant/KAIROS mode, sub-agents, MCP all wired end-to-end.
 - **2026-04-03** — Provider config overhaul: `settings.json` persistent config, `/model` hot-switch in REPL, AgentTool fixes.
 - **2026-04-02** — Initial release: Phase 1-7 implemented in a single day. Core agent loop, 12 tools, 3-layer compaction, memory system, hooks, skills, MCP, sub-agents, and assistant mode.
@@ -46,6 +47,7 @@
 - **Hook System** — 5 event types × 3 hook types, auto-triggered around tool execution
 - **Skills** — file-based plugins with fork isolation support
 - **MCP Integration** — stdio / HTTP / SSE transports, tools + resources
+- **Session Persistence** — incremental transcript save, compact-boundary-aware restore, `-c` continue, `/resume` picker
 - **Sub-Agents** — fork with isolated context + coordinator for parallel/serial task orchestration
 - **Assistant / KAIROS Mode** — long-running daemon with proactive ticks and structured Brief output
 
@@ -79,11 +81,15 @@ uv run nanocc -p "explain this codebase"
 # Interactive REPL
 uv run nanocc
 
+# Resume last session
+uv run nanocc -c
+
 # Override model via CLI flags
 uv run nanocc -m anthropic/claude-sonnet-4 --api-key $KEY
 
-# Switch model in REPL
+# Switch model / resume in REPL
 > /model qwen/qwen3.5-flash-02-23
+> /resume
 ```
 
 ### Install globally (optional)
@@ -328,7 +334,7 @@ src/nanocc/
 ├── cli/                  # CLI entry (click + rich)
 └── utils/                # Utilities (abort, tokens, git, config, cost)
 
-tests/                    # 153 tests, mock provider, no API key needed
+tests/                    # 176 tests, mock provider, no API key needed
 ```
 
 ## Development
@@ -348,7 +354,7 @@ uv run python -c "import nanocc"
 
 | Metric | Value |
 |---|---|
-| Source lines | ~7,600 |
+| Source lines | ~8,100 |
 | Target | ~10,000 |
 | Phases completed | 7 / 10 + integration fixes |
 | Built-in tools | 12 |
@@ -356,7 +362,7 @@ uv run python -c "import nanocc"
 | Compact layers | 3 |
 | Memory modules | 6 |
 | MCP transports | 3 |
-| Tests | 153 |
+| Tests | 176 |
 
 See [docs/progress.md](docs/progress.md) for detailed phase-by-phase progress.
 

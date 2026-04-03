@@ -120,8 +120,23 @@ def message_to_api(msg: Message) -> dict[str, Any] | None:
         content = [content_block_to_api(b) for b in msg.content]
         return {"role": "assistant", "content": content}
     elif isinstance(msg, SystemMessage):
+        # Not sent to API, but needed for transcript persistence
         return None
     return None
+
+
+def message_to_transcript(msg: Message) -> dict[str, Any]:
+    """Convert internal Message to transcript format (includes SystemMessage)."""
+    if isinstance(msg, SystemMessage):
+        return {
+            "role": "system",
+            "subtype": msg.subtype.value,
+            "content": msg.text,
+        }
+    api_msg = message_to_api(msg)
+    if api_msg is not None:
+        return api_msg
+    return {"role": "unknown"}
 
 
 def to_api_messages(messages: list[Message]) -> list[dict[str, Any]]:
@@ -132,6 +147,11 @@ def to_api_messages(messages: list[Message]) -> list[dict[str, Any]]:
         if api_msg is not None:
             result.append(api_msg)
     return result
+
+
+def to_transcript_messages(messages: list[Message]) -> list[dict[str, Any]]:
+    """Convert message list to transcript format (includes SystemMessage)."""
+    return [message_to_transcript(msg) for msg in messages]
 
 
 def to_api_system_prompt(
@@ -199,6 +219,15 @@ def from_api_message(api_msg: dict[str, Any]) -> Message | None:
             else:
                 blocks.append(block)
         return AssistantMessage(content=blocks)
+
+    elif role == "system":
+        subtype_str = api_msg.get("subtype", "")
+        text = content if isinstance(content, str) else ""
+        try:
+            subtype = SystemMessageSubtype(subtype_str)
+        except ValueError:
+            subtype = SystemMessageSubtype.COMPACT_BOUNDARY
+        return SystemMessage(subtype=subtype, text=text)
 
     return None
 

@@ -30,7 +30,7 @@ from nanocc.types import (
     ToolUseBlock,
 )
 
-from .commands import SLASH_NAMES, handle_command
+from .commands import SLASH_NAMES, handle_command, print_recent_context
 
 console = Console()
 
@@ -215,6 +215,51 @@ def _summarize_input(input: dict) -> str:
     return ", ".join(f"{k}=..." for k in list(input)[:3])
 
 
+# ── Session restore ────────────────────────────────────────────────────────
+
+
+def _try_restore_latest(engine: QueryEngine) -> bool:
+    """Try to restore the latest session for the current cwd.
+
+    Returns True if a session was restored.
+    """
+    from nanocc.utils.session_storage import (
+        list_sessions,
+        load_transcript_after_boundary,
+    )
+    from nanocc.messages import from_api_messages
+
+    cwd = engine.cwd
+    sessions = list_sessions(cwd=cwd)
+    if not sessions:
+        console.print("[dim]No previous sessions found.[/dim]")
+        return False
+
+    latest = sessions[0]
+    sid = latest["session_id"]
+
+    # Load transcript after last compact boundary
+    transcript_msgs = load_transcript_after_boundary(sid)
+    if not transcript_msgs:
+        console.print("[dim]Session transcript is empty.[/dim]")
+        return False
+
+    # Build state dict for restore_state
+    from nanocc.utils.session_storage import load_session_state
+    saved_state = load_session_state(sid)
+
+    # Use transcript messages (boundary-aware) instead of state's messages
+    state: dict = {
+        "session_id": sid,
+        "cwd": cwd,
+        "messages": transcript_msgs,
+        "usage": saved_state.get("usage", {}) if saved_state else {},
+        "session_memory": saved_state.get("session_memory", "") if saved_state else "",
+    }
+    engine.restore_state(state)
+    return True
+
+
 # ── One-shot mode ──────────────────────────────────────────────────────────
 
 
@@ -250,11 +295,18 @@ async def run_query(
     api_key: str | None,
     prompt: str,
     base_url: str | None = None,
+    continue_session: bool = False,
 ) -> None:
     """Run a single query via QueryEngine and stream to terminal."""
     engine = _create_engine(model, system_prompt, provider_name, api_key, base_url)
+
+    if continue_session:
+        _try_restore_latest(engine)
+
     _, tok_out, elapsed = await _stream_response(engine, prompt)
     console.print(f"\n[dim]{tok_out:,} tokens | {_format_duration(elapsed)}[/dim]")
+
+    engine.save_session()
 
 
 # ── REPL mode ──────────────────────────────────────────────────────────────
@@ -266,15 +318,22 @@ async def repl(
     provider_name: str,
     api_key: str | None,
     base_url: str | None = None,
+    continue_session: bool = False,
 ) -> None:
     """Interactive REPL loop via QueryEngine."""
     engine = _create_engine(model, system_prompt, provider_name, api_key, base_url)
+
+    if continue_session:
+        _try_restore_latest(engine)
 
     # Welcome banner
     console.print(
         f"[bold cyan]nanocc[/bold cyan] [dim]({model})[/dim]",
         highlight=False,
     )
+    if continue_session and engine.messages:
+        console.print(f"[dim]Resumed session {engine.session_id} ({len(engine.messages)} messages)[/dim]")
+        print_recent_context(console, engine)
     tool_names = ", ".join(t.name for t in engine.tools)
     console.print(f"[dim]Tools: {tool_names}[/dim]")
     console.print("[dim]Type /help for commands, /exit to quit.[/dim]\n")
@@ -309,15 +368,23 @@ async def repl(
             )
             if result == "exit":
                 break
+            if result == "resumed":
+                console.print(f"[dim]Resumed session {engine.session_id} ({len(engine.messages)} messages)[/dim]\n")
             continue
 
         try:
             tok_in, tok_out, elapsed = await _stream_response(engine, user_input)
             total_tokens += tok_in + tok_out
             console.print(f"\n[dim]{tok_out:,} tokens | {_format_duration(elapsed)}[/dim]\n")
+            # Save after each turn
+            engine.save_session()
         except KeyboardInterrupt:
             engine.abort()
             console.print("\n[dim]Interrupted.[/dim]")
+
+    # Final save on exit
+    if engine.messages:
+        engine.save_session()
 
 
 # ── CLI entry point ────────────────────────────────────────────────────────
@@ -338,6 +405,10 @@ async def repl(
 @click.option(
     "--base-url", default=None, help="API base URL for custom OpenAI-compatible providers."
 )
+@click.option(
+    "-c", "--continue", "continue_session", is_flag=True, default=False,
+    help="Resume the most recent session in this directory.",
+)
 def main(
     prompt: str | None,
     model: str | None,
@@ -345,6 +416,7 @@ def main(
     provider: str | None,
     api_key: str | None,
     base_url: str | None,
+    continue_session: bool,
 ) -> None:
     """nanocc — Python Nano Claude Code."""
     cwd = os.getcwd()
@@ -363,9 +435,9 @@ def main(
         sys.exit(1)
 
     if prompt:
-        asyncio.run(run_query(cfg.model, system, cfg.provider, cfg.api_key, prompt, cfg.api_base_url))
+        asyncio.run(run_query(cfg.model, system, cfg.provider, cfg.api_key, prompt, cfg.api_base_url, continue_session))
     else:
-        asyncio.run(repl(cfg.model, system, cfg.provider, cfg.api_key, cfg.api_base_url))
+        asyncio.run(repl(cfg.model, system, cfg.provider, cfg.api_key, cfg.api_base_url, continue_session))
 
 
 if __name__ == "__main__":

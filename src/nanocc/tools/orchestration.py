@@ -157,10 +157,21 @@ async def run_tools(
                     r = await execute_single_tool(b, tools, context, hook_engine)
                     return b.id, r
 
-            tasks = [run_with_sem(b) for b in batch.blocks]
-            for coro in asyncio.as_completed(tasks):
-                block_id, result = await coro
-                results[block_id] = result
+            gather_results = await asyncio.gather(
+                *(run_with_sem(b) for b in batch.blocks),
+                return_exceptions=True,
+            )
+            for b, item in zip(batch.blocks, gather_results):
+                if isinstance(item, BaseException):
+                    logger.error("Concurrent tool execution failed: %s", item)
+                    results[b.id] = ToolResultBlock(
+                        tool_use_id=b.id,
+                        content=f"Error: {item}",
+                        is_error=True,
+                    )
+                else:
+                    block_id, result = item
+                    results[block_id] = result
         else:
             # Run serially
             for block in batch.blocks:

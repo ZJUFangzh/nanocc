@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from nanocc.agents.fork import fork_agent
+from nanocc.constants import SUBAGENT_TIMEOUT_SECONDS
 from nanocc.messages import get_text_content
 from nanocc.tools.base import BaseTool
 from nanocc.types import AssistantMessage, Terminal, ToolResult, ToolUseContext
@@ -43,7 +45,9 @@ class AgentTool(BaseTool):
         system_prompt = context.options.get("system_prompt", "You are a helpful sub-agent.")
 
         collected_text = ""
-        try:
+
+        async def _run_agent() -> str:
+            text = ""
             async for event in fork_agent(
                 prompt=prompt,
                 provider=provider,
@@ -55,11 +59,22 @@ class AgentTool(BaseTool):
                 parent_abort=context.abort_controller,
             ):
                 if isinstance(event, AssistantMessage):
-                    text = get_text_content(event)
-                    if text:
-                        collected_text = text
+                    t = get_text_content(event)
+                    if t:
+                        text = t
                 elif isinstance(event, Terminal):
                     break
+            return text
+
+        try:
+            collected_text = await asyncio.wait_for(
+                _run_agent(), timeout=SUBAGENT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            return ToolResult(
+                content=f"Sub-agent timed out after {SUBAGENT_TIMEOUT_SECONDS}s",
+                is_error=True,
+            )
         except Exception as e:
             return ToolResult(content=f"Sub-agent error: {e}", is_error=True)
 

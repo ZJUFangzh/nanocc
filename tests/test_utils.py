@@ -11,11 +11,12 @@ import pytest
 from nanocc.utils.abort import AbortController
 from nanocc.utils.cost import UsageTracker
 from nanocc.utils.session_storage import (
+    append_messages,
     list_sessions,
     load_session_state,
     load_transcript,
+    save_meta,
     save_session_state,
-    save_transcript,
 )
 
 
@@ -77,8 +78,7 @@ def test_save_load_transcript(monkeypatch, tmp_path):
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": [{"type": "text", "text": "hi"}]},
     ]
-    path = save_transcript("test-session", messages)
-    assert path.exists()
+    append_messages("test-session", messages, 0)
 
     loaded = load_transcript("test-session")
     assert loaded is not None
@@ -105,8 +105,10 @@ def test_save_load_session_state(monkeypatch, tmp_path):
 def test_list_sessions(monkeypatch, tmp_path):
     monkeypatch.setattr("nanocc.utils.session_storage.get_sessions_dir", lambda: tmp_path)
 
-    save_transcript("s1", [{"role": "user", "content": "a"}])
-    save_transcript("s2", [{"role": "user", "content": "b"}])
+    append_messages("s1", [{"role": "user", "content": "a"}], 0)
+    save_meta("s1", message_count=1)
+    append_messages("s2", [{"role": "user", "content": "b"}], 0)
+    save_meta("s2", message_count=1)
 
     sessions = list_sessions()
     assert len(sessions) == 2

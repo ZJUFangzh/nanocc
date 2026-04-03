@@ -53,11 +53,13 @@ Provider/Model/API Key 通过 `~/.nanocc/settings.json`（全局）或 `.nanocc/
 # 运行（配好 settings.json 后无需额外参数）
 uv run nanocc -p "prompt"                          # 单轮
 uv run nanocc                                       # REPL
+uv run nanocc -c                                    # 恢复上次会话
 uv run nanocc -m qwen/qwen3.5-flash --api-key $KEY # CLI 标志覆盖 settings
 
-# REPL 中切换模型
+# REPL 中切换模型 / 恢复会话
 > /model                                            # 查看当前模型
 > /model qwen/qwen3.5-flash-02-23                   # 切换模型
+> /resume                                           # 列出并恢复历史会话
 
 # 安装为全局 CLI（editable 模式，改代码立即生效）
 uv tool install -e .                                # 推荐：装到 ~/.local/bin/nanocc
@@ -69,7 +71,7 @@ uv run python -c "import nanocc"                    # 验证导入
 uv run python -m nanocc --help                      # CLI 帮助
 
 # 测试
-uv run pytest tests/ -v                             # 全量测试（153 个）
+uv run pytest tests/ -v                             # 全量测试（176 个）
 uv run pytest tests/test_query.py -v                # 单模块测试
 ```
 
@@ -120,7 +122,7 @@ src/nanocc/
 ├── cli/              # CLI 入口（click + rich）
 └── utils/            # 工具模块（abort, tokens, git, config, session_storage, cost）
 
-tests/                # 153 个测试，mock provider 不需要 API key，uv run pytest tests/ -v
+tests/                # 176 个测试，mock provider 不需要 API key，uv run pytest tests/ -v
 ```
 
 ## 当前状态
@@ -134,6 +136,7 @@ tests/                # 153 个测试，mock provider 不需要 API key，uv run
 - **Phase 7** ✅ Assistant / KAIROS 模式：长驻守护 + proactive tick + Brief 工具
 - **链路修复** ✅ (2026-04-03) 9 项跨模块集成修复 + 153 个测试用例
 - **Provider 配置重构** ✅ (2026-04-03) settings.json 持久化配置 + /model 切换 + AgentTool 修复
+- **Session 持久化** ✅ (2026-04-03) 增量 transcript append + compact boundary 感知恢复 + `-c`/`--continue` + `/resume` 命令 + AgentTool 超时 + 工具并发异常处理
 - **Phase 8-10** 待实现（见 structure.md）
 
 ### 链路修复详情 (2026-04-03)
