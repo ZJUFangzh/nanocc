@@ -61,7 +61,7 @@ async def query(
     )
 
     state = LoopState(
-        messages=list(params.messages),
+        messages=params.messages,
         tool_use_context=tool_use_context,
     )
     compact_tracking = state.auto_compact_tracking or AutoCompactTracking()
@@ -92,10 +92,8 @@ async def query(
             context_window, compact_tracking, turn,
         )
         if compacted is not None:
-            state.messages = compacted
-            # Update the caller's message list too
-            params.messages.clear()
-            params.messages.extend(compacted)
+            state.messages.clear()
+            state.messages.extend(compacted)
 
         # ── 2. Build API messages and stream ────────────────────────────
         api_messages = to_api_messages(state.messages)

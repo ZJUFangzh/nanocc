@@ -95,6 +95,39 @@ def test_engine_clear(engine):
     assert not engine.session_memory.initialized
 
 
+@pytest.mark.asyncio
+async def test_multi_turn_messages_accumulate():
+    """Regression: assistant messages must persist across turns.
+
+    Previously query.py copied params.messages into state.messages,
+    so assistant replies were never written back to engine.messages.
+    On the next turn the LLM only saw user messages (no assistant
+    responses), causing it to re-process everything from scratch.
+    """
+    provider = MockProvider([
+        text_events("reply 1"),
+        text_events("reply 2"),
+    ])
+    config = QueryEngineConfig(provider=provider, model="test", cwd=".")
+    eng = QueryEngine(config)
+
+    # Turn 1
+    async for _ in eng.submit_message("hello"):
+        pass
+
+    assert len(eng.messages) == 2, "should have [user, assistant] after turn 1"
+    assert eng.messages[0].role == "user"
+    assert eng.messages[1].role == "assistant"
+
+    # Turn 2
+    async for _ in eng.submit_message("world"):
+        pass
+
+    assert len(eng.messages) == 4, "should have [u1, a1, u2, a2] after turn 2"
+    roles = [m.role for m in eng.messages]
+    assert roles == ["user", "assistant", "user", "assistant"]
+
+
 def test_engine_abort(engine):
     engine._abort = None
     engine.abort()  # Should not raise
