@@ -7,7 +7,7 @@ nanocc 是 Claude Code 2.1.88 的 Python 精简复刻，目标 ~10,000 行。
 
 ## 关键文件
 
-- `structure.md` — 完整架构规划（10 个 Phase），**任何设计决策都以此为准**
+- `ARCHITECTURE.md` — 完整架构规划（10 个 Phase），**任何设计决策都以此为准**
 - `docs/progress.md` — 开发进度和已完成的 Phase 记录
 - `../claude-code-main/` — Claude Code 源码参考
 

@@ -1,7 +1,7 @@
 # nanocc 开发进度
 
 目标：基于 Claude Code 2.1.88 源码，用 Python 复刻核心架构，控制在 ~10,000 行。
-完整规划见 `structure.md`（10 个 Phase）。
+完整规划见 `ARCHITECTURE.md`（10 个 Phase）。
 
 ---
 
@@ -22,7 +22,7 @@
 | `src/nanocc/utils/abort.py` | 46 | AbortController（asyncio Event） |
 | `src/nanocc/providers/base.py` | 85 | LLMProvider Protocol + ProviderEvent 归一化类型 |
 | `src/nanocc/providers/anthropic.py` | 171 | Anthropic Claude 原生 SDK 流式 |
-| `src/nanocc/providers/openai_compat.py` | 247 | OpenAI 兼容（OpenRouter/Together/Groq） |
+| `src/nanocc/providers/openai_compat.py` | 247 | OpenAI 兼容 API 适配层 |
 | `src/nanocc/providers/registry.py` | 38 | Provider 工厂，自动匹配 base_url |
 | `src/nanocc/cli/app.py` | 270 | Click CLI：`-p` 单轮 + REPL 多轮 |
 
@@ -206,7 +206,7 @@ uv run nanocc -p "List all .py files and count lines" --api-key $KEY -m moonshot
 
 ## 链路修复 ✅ (2026-04-03)
 
-**目标**: 审查 structure.md，修复所有已实现但未接通的跨模块链路，补全测试。
+**目标**: 审查架构规划，修复所有已实现但未接通的跨模块链路，补全测试。
 
 **修复项 (9 项)**:
 
@@ -226,20 +226,63 @@ uv run nanocc -p "List all .py files and count lines" --api-key $KEY -m moonshot
 
 ---
 
+## Provider 配置重构 ✅ (2026-04-03)
+
+**目标**: settings.json 持久化配置 + /model 运行时切换 + AgentTool 修复。
+
+**变更**:
+- `utils/config.py` — 支持 `~/.nanocc/settings.json` 和 `.nanocc/settings.json` 层级配置
+- `providers/registry.py` — 按 provider 名自动匹配 base_url
+- `cli/app.py` — `/model` 命令运行时切换模型
+- `tools/agent_tool.py` — 修复子 agent provider 继承
+
+**关键设计决策**:
+- 优先级：`/model` 会话覆盖 > CLI 标志 > 环境变量 > settings.json > 内置默认值
+- 已知 provider 自动匹配 baseUrl，未知 provider 走 OpenAI 兼容（需配 `apiBaseUrl`）
+
+---
+
+## Session 持久化 ✅ (2026-04-03)
+
+**目标**: 增量 transcript + compact 感知恢复 + `-c`/`--continue` + `/resume` 命令。
+
+**变更**:
+- `utils/session_storage.py` — 增量 append 模式写入 transcript（JSONL）
+- `engine.py` — compact boundary 感知的 state 恢复
+- `cli/app.py` — `-c`/`--continue` 恢复上次会话 + `/resume` 列出历史会话
+- `tools/agent_tool.py` — 子 agent 超时处理
+- `tools/orchestration.py` — 工具并发异常处理（单个工具失败不影响整批）
+- `query.py` — engine 与 query loop 共享 message list
+
+**新增测试**: 23 个测试用例，总计 176 个
+
+---
+
+## Provider 精简 ✅ (2026-04-03)
+
+**目标**: 移除 together/groq 专用 provider，统一走 custom OpenAI 兼容。
+
+**变更**:
+- 移除 `providers/` 中 together/groq 相关代码
+- `CLAUDE.md` 补充 custom provider 配置示例
+- 已知 provider 收敛为 3 个：openrouter, anthropic, openai
+
+---
+
 ## 当前统计
 
 | 指标 | 值 |
 |---|---|
-| 总代码行数 | ~6,200 |
+| 总代码行数 | ~6,700 |
 | 目标行数 | ~9,800 |
-| 完成 Phase | 7 / 10 + 链路修复 |
-| Python 文件数 | 77 (含 15 个测试) |
+| 完成 Phase | 7 / 10 + 链路修复 + 配置/持久化/精简 |
+| Python 文件数 | 85 (含 17 个测试) |
 | 核心工具数 | 12 (Bash, Read, Write, Edit, Glob, Grep, Agent, AskUser, WebFetch, Skill, Brief, Sleep) |
-| 支持的 Provider | 5 (openrouter, anthropic, openai, together, groq) |
+| 支持的 Provider | 3 + custom (openrouter, anthropic, openai) |
 | Compact 层数 | 3 (budget + micro + auto) |
 | 记忆模块 | 6 (memdir, session_memory, claude_md, extract, auto_dream, daily_log) |
 | MCP transport | 3 (stdio, http, sse) |
-| 测试用例 | 153 |
+| 测试用例 | 176 |
 
 ---
 
