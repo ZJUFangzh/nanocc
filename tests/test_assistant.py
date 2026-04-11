@@ -1,77 +1,18 @@
-"""Tests for assistant mode — mode, proactive, brief."""
+"""Tests for assistant mode mechanisms — proactive engine + Brief/Sleep tools.
+
+Note: AssistantMode (lifecycle orchestration) was moved to the cowork product.
+nanocc only provides the underlying mechanisms (ProactiveEngine, BriefTool, SleepTool).
+"""
 
 from __future__ import annotations
 
-import json
-import tempfile
-from pathlib import Path
-
 import pytest
 
-from nanocc.assistant.mode import AssistantMode
 from nanocc.assistant.proactive import ProactiveEngine, WakeEvent, WakeReason
 from nanocc.assistant.brief import BriefTool, SleepTool
 from nanocc.messages import create_user_message
 from nanocc.types import ToolUseContext
 from nanocc.utils.abort import AbortController
-
-
-# ── AssistantMode ──
-
-def test_assistant_mode_activate():
-    mode = AssistantMode()
-    assert not mode.active
-    sid = mode.activate()
-    assert mode.active
-    assert mode.session_id == sid
-    assert len(sid) > 0
-
-
-def test_assistant_mode_activate_with_id():
-    mode = AssistantMode()
-    sid = mode.activate("custom-id")
-    assert sid == "custom-id"
-    assert mode.session_id == "custom-id"
-
-
-def test_assistant_mode_suspend_resume():
-    mode = AssistantMode()
-    mode.activate("test-session")
-
-    state = {"messages": [], "model": "test", "cwd": "."}
-    mode.suspend(state)
-
-    # Resume
-    mode2 = AssistantMode()
-    restored = mode2.resume("test-session")
-    assert restored is not None
-    assert "suspended_at" in restored
-    assert restored["session_id"] == "test-session"
-
-
-def test_assistant_mode_resume_no_session():
-    mode = AssistantMode()
-    result = mode.resume("nonexistent-id")
-    assert result is None
-
-
-def test_assistant_mode_bridge_pointer():
-    mode = AssistantMode()
-    mode.activate("pointer-test")
-
-    mode2 = AssistantMode()
-    pointer = mode2._load_pointer()
-    assert pointer == "pointer-test"
-
-
-def test_assistant_mode_list_sessions():
-    mode = AssistantMode()
-    mode.activate("list-test")
-    mode.suspend({"messages": [], "model": "test"})
-
-    sessions = mode.list_sessions()
-    ids = [s["session_id"] for s in sessions]
-    assert "list-test" in ids
 
 
 # ── ProactiveEngine ──

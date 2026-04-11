@@ -3,12 +3,15 @@
 ## 项目概述
 
 nanocc 是 Claude Code 2.1.88 的 Python 精简复刻，目标 ~10,000 行。
-既可作为 CLI 日常使用，也可作为 Agent SDK，还支持通过 Channel 对接 IM 平台。
+**定位为纯 agent runtime**：既可作为 CLI 日常使用，也可作为 Agent SDK 嵌入到上层产品。
+IM 接入（Telegram/Slack/...）、桌面 GUI、多 session 编排等产品层功能由独立的 cowork 项目实现，
+不在 nanocc 范围内。详见 `docs/cowork-boundary.md`。
 
 ## 关键文件
 
 - `ARCHITECTURE.md` — 完整架构规划（10 个 Phase），**任何设计决策都以此为准**
 - `docs/progress.md` — 开发进度和已完成的 Phase 记录
+- `docs/cowork-boundary.md` — nanocc 与 cowork 的边界，cowork 项目消费 nanocc 的方式
 - `../claude-code-main/` — Claude Code 源码参考
 
 ## 技术栈
@@ -71,14 +74,14 @@ uv run python -c "import nanocc"                    # 验证导入
 uv run python -m nanocc --help                      # CLI 帮助
 
 # 测试
-uv run pytest tests/ -v                             # 全量测试（176 个）
+uv run pytest tests/ -v                             # 全量测试（170 个）
 uv run pytest tests/test_query.py -v                # 单模块测试
 ```
 
 ## 架构核心
 
 ```
-CLI / Channel / SDK
+CLI / SDK / cowork (外部产品)
        ↓
   QueryEngine (engine.py)      ← 有状态会话容器（Phase 4）
        ↓
@@ -107,22 +110,23 @@ src/nanocc/
 ├── types.py          # 核心类型定义（Message, ContentBlock, QueryParams, LoopState）
 ├── constants.py      # 常量阈值（与 CC 一致）
 ├── messages.py       # 消息创建/API 格式转换/反序列化（from_api_messages）
-├── query.py          # agent loop 异步 generator 状态机 + hook 触发 + assistant tick
+├── query.py          # agent loop 异步 generator 状态机 + hook 触发 + assistant tick 分支
 ├── context.py        # 三段式 system prompt 装配 + cache_control
 ├── providers/        # LLM 后端（anthropic / openai_compat）
-├── tools/            # 工具系统（12 个工具 + orchestration 含 hook 集成）
+├── tools/            # 工具系统（10 个核心工具 + orchestration 含 hook 集成）
 ├── compact/          # 上下文管理（budget → micro → auto compact）
-├── engine.py         # 有状态会话容器（get_state/restore_state + extract_memories）
+├── engine.py         # 有状态会话容器（get_state/restore_state/save_session + extract_memories）
 ├── memory/           # 记忆系统（memdir, session_memory[10 sections], auto_dream[3 phases], daily_log）
 ├── hooks/            # Hook 系统（5 事件 × 3 类型，已接入 query loop）
 ├── skills/           # Skill 加载与执行（含 fork 模式）
 ├── mcp/              # MCP server 集成（stdio/http/sse + resources）
 ├── agents/           # 子 Agent（fork + coordinator[parallel+serial]）
-├── assistant/        # Assistant/KAIROS 模式（mode, proactive tick, Brief/Sleep 工具）
+├── assistant/        # Assistant 模式机制（proactive tick 队列, Brief/Sleep 工具）
+│                     # 注：AssistantMode 编排器已移至 cowork
 ├── cli/              # CLI 入口（click + rich）
 └── utils/            # 工具模块（abort, tokens, git, config, session_storage, cost）
 
-tests/                # 176 个测试，mock provider 不需要 API key，uv run pytest tests/ -v
+tests/                # 170 个测试，mock provider 不需要 API key，uv run pytest tests/ -v
 ```
 
 ## 当前状态
@@ -133,11 +137,12 @@ tests/                # 176 个测试，mock provider 不需要 API key，uv run
 - **Phase 4** ✅ Engine + 记忆系统：memdir + session_memory + auto_dream + 会话持久化
 - **Phase 5** ✅ Hooks + Skills + MCP：插件系统 + skill 执行 + MCP server 集成
 - **Phase 6** ✅ 子 Agent：fork + coordinator + AgentTool 并行任务
-- **Phase 7** ✅ Assistant / KAIROS 模式：长驻守护 + proactive tick + Brief 工具
+- **Phase 7** ✅ Assistant 模式机制：proactive tick 事件队列 + Brief/Sleep 工具
 - **链路修复** ✅ (2026-04-03) 9 项跨模块集成修复 + 153 个测试用例
 - **Provider 配置重构** ✅ (2026-04-03) settings.json 持久化配置 + /model 切换 + AgentTool 修复
 - **Session 持久化** ✅ (2026-04-03) 增量 transcript append + compact boundary 感知恢复 + `-c`/`--continue` + `/resume` 命令 + AgentTool 超时 + 工具并发异常处理
-- **Phase 8-10** 待实现（见 structure.md）
+- **架构分离** ✅ (2026-04-11) 删除 AssistantMode 生命周期编排器和 channels/ 目录，移至独立的 cowork 项目；BriefTool/SleepTool 从默认 registry 移除（cowork 启用 assistant_mode 时手动追加）
+- **Phase 8-10** 待实现（见 ARCHITECTURE.md）
 
 ### 链路修复详情 (2026-04-03)
 
@@ -147,7 +152,7 @@ tests/                # 176 个测试，mock provider 不需要 API key，uv run
 2. **Assistant tick 分支** — query.py end_turn 后等待 proactive_engine.wait_for_next()（tick/user_message/shutdown）
 3. **Engine restore_state** — 反序列化 messages/usage/session_memory，--continue 链路打通
 4. **Engine extract_memories** — 每轮结束后后台 fire-and-forget LLM side-query 抽取 memory
-5. **BriefTool + SleepTool 注册** — tools/registry.py 12 个工具
+5. **BriefTool + SleepTool 注册** — tools/registry.py（已于 2026-04-11 架构分离时移出默认 registry，cowork 在 assistant 模式下手动追加）
 6. **session_memory 10 sections** — 补了 Open Questions/Dependencies/Decisions Made/Next Steps
 7. **Skill fork 模式** — execute_skill() 支持 context="fork" 在隔离子 agent 运行
 8. **coordinator serial subtasks** — run_serial_subtasks() 顺序执行写任务

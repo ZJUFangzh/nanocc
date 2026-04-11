@@ -17,7 +17,6 @@ def get_all_tools() -> list[BaseTool]:
     from nanocc.tools.grep_tool import GrepTool
     from nanocc.tools.skill_tool import SkillTool
     from nanocc.tools.web_fetch import WebFetchTool
-    from nanocc.assistant.brief import BriefTool, SleepTool
 
     return [
         BashTool(),
@@ -30,8 +29,6 @@ def get_all_tools() -> list[BaseTool]:
         AskUserTool(),
         AgentTool(),
         SkillTool(),
-        BriefTool(),
-        SleepTool(),
     ]
 
 

@@ -22,7 +22,7 @@ from nanocc.types import ToolResult, ToolUseBlock, ToolUseContext
 def test_get_all_tools():
     tools = get_all_tools()
     names = [t.name for t in tools]
-    assert len(tools) == 12
+    assert len(tools) == 10
     assert "Bash" in names
     assert "Read" in names
     assert "Write" in names
@@ -33,8 +33,10 @@ def test_get_all_tools():
     assert "AskUser" in names
     assert "Agent" in names
     assert "Skill" in names
-    assert "Brief" in names
-    assert "Sleep" in names
+    # Brief/Sleep are assistant-mode-only tools (not in default registry).
+    # The cowork product appends them when assistant_mode is enabled.
+    assert "Brief" not in names
+    assert "Sleep" not in names
 
 
 def test_find_tool():

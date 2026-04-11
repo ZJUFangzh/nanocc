@@ -2,7 +2,7 @@
 
 ## Context
 
-基于 Claude Code 2.1.88 源码的深度分析，用 Python 复刻其核心架构，控制在 1 万行以内。目标：既可作为 CLI 日常使用，也可作为可扩展的 Agent SDK，同时支持通过 Channel 对接 Telegram 等 IM 平台。
+基于 Claude Code 2.1.88 源码的深度分析，用 Python 复刻其核心架构，控制在 1 万行以内。目标：作为纯 agent runtime 既可用作 CLI 日常工具，也可作为 Agent SDK 嵌入到上层产品（如 cowork 桌面助理）。Channel/IM 接入和 session 编排属于上层产品的职责。
 
 ---
 
@@ -129,7 +129,7 @@ nanocc/
 ├── src/nanocc/
 │   ├── __init__.py              (30)   -- 公共 API 导出
 │   ├── __main__.py              (10)   -- python -m nanocc
-│   ├── types.py                 (280)  -- Message, ContentBlock, StreamEvent, Terminal, AssistantMode
+│   ├── types.py                 (280)  -- Message, ContentBlock, StreamEvent, Terminal, QueryParams
 │   ├── constants.py             (100)  -- token 阈值、限制常量、hook 事件枚举
 │   │
 │   ├── # ── 核心引擎 ──
@@ -193,11 +193,11 @@ nanocc/
 │   │   ├── auto_dream.py        (200)  -- 离线 memory 蒸馏 (跨 session transcript 归并)
 │   │   └── daily_log.py         (120)  -- Assistant 模式日志制 memory (append-only)
 │   │
-│   ├── # ── Assistant / Daemon 模式 (KAIROS) ──
+│   ├── # ── Assistant / Daemon 模式机制 (KAIROS) ──
+│   │   # 注：AssistantMode 生命周期编排器已移至 cowork 产品层
 │   ├── assistant/
-│   │   ├── mode.py              (150)  -- 模式检测、初始化、session 持久化
-│   │   ├── proactive.py         (150)  -- tick 循环、Sleep 工具、焦点感知
-│   │   └── brief.py             (100)  -- Brief 结构化消息通道
+│   │   ├── proactive.py         (150)  -- ProactiveEngine: tick 循环 + 唤醒事件队列
+│   │   └── brief.py             (100)  -- BriefTool / SleepTool (cowork 启用 assistant_mode 时手动追加)
 │   │
 │   ├── # ── 子 Agent ──
 │   ├── agents/
@@ -207,13 +207,6 @@ nanocc/
 │   ├── # ── 上下文装配 ──
 │   ├── context.py               (200)  -- system prompt + user/system context
 │   ├── messages.py              (250)  -- 消息创建/归一化/辅助
-│   │
-│   ├── # ── Channel / IM 通道 ──
-│   ├── channels/
-│   │   ├── base.py              (150)  -- Channel 协议 (消息收发抽象)
-│   │   ├── telegram.py          (250)  -- Telegram Bot 通道
-│   │   ├── webhook.py           (150)  -- 通用 Webhook 通道 (Slack/Discord/飞书)
-│   │   └── websocket.py         (150)  -- WebSocket 通道 (Web UI / 自定义前端)
 │   │
 │   ├── # ── CLI / 终端 UI ──
 │   ├── cli/
@@ -295,7 +288,7 @@ async def query(params: QueryParams) -> AsyncGenerator[StreamEvent | Message, Te
 - `submit_message()` -> 组装上下文 -> 调用 `query()` -> yield 事件
 - 管理 abort controller 生命周期
 - 追踪 usage/cost
-- SDK、CLI 和 Channel 共用同一个 Engine
+- SDK、CLI 和上层产品（cowork）共用同一个 Engine
 - 每轮结束后触发 `extract_memories()` 和 `session_memory.maybe_update()`
 
 ### 3. LLM Provider 抽象 (`providers/`)
@@ -615,76 +608,15 @@ def get_memory_prompt(assistant_mode: bool) -> str:
 **CLAUDE.md** (`claude_md.py`)：
 - 层级加载：~/.nanocc/CLAUDE.md -> 项目根 -> 当前目录
 
-### 10. Assistant / Daemon 模式 (`assistant/`) -- 新增
+### 10. Assistant / Daemon 模式机制 (`assistant/`)
 
-**复刻 Claude Code KAIROS 的核心机制**：把 nanocc 从"你问我答"的 REPL 变成长驻后台的主动式助手。
+**复刻 Claude Code KAIROS 的核心机制**：让 query loop 在 end_turn 后能等待 tick 或新输入而非直接返回。
 
-#### 10.1 模式检测与 Session 持久化 (`mode.py`)
+> **边界说明**：nanocc 只提供机制（ProactiveEngine、Brief/Sleep 工具、query loop 的 tick 分支），
+> 不提供 session 生命周期编排（activate/suspend/resume/bridge-pointer）。
+> 后者属于 cowork 产品的 SessionManager，详见 `docs/cowork-boundary.md`。
 
-```python
-class AssistantMode:
-    """Assistant 模式的生命周期管理"""
-
-    def __init__(self, state_dir: Path):
-        self._state_dir = state_dir       # ~/.nanocc/sessions/
-        self._active = False
-        self._session_id: str | None = None
-
-    def activate(self, session_id: str | None = None):
-        """
-        激活 assistant 模式：
-        - 分配或恢复 session_id
-        - 切换 memory 到日志制
-        - 启动 proactive tick 循环
-        - 注册 Brief 工具
-        """
-        self._active = True
-        self._session_id = session_id or generate_session_id()
-        self._save_pointer()  # 写入 bridge-pointer 以便 --continue 恢复
-
-    def suspend(self):
-        """
-        挂起 session（不销毁）：
-        - 序列化 mutableMessages 到 transcript 文件
-        - 保存 session state (usage, memory path, cwd)
-        - 停止 tick 循环
-        """
-
-    async def resume(self, session_id: str | None = None) -> SessionState:
-        """
-        恢复 session：
-        - session_id=None 时从 bridge-pointer 读取最近 session
-        - 反序列化 mutableMessages
-        - 恢复 memory 状态
-        - 重启 tick 循环
-        """
-
-    def _save_pointer(self):
-        """写入 ~/.nanocc/bridge-pointer 记录当前 session"""
-
-    def _load_pointer(self) -> str | None:
-        """读取最近 session id"""
-```
-
-**启动方式**：
-```bash
-# 普通 REPL 模式（默认）
-nanocc
-
-# 进入 Assistant 模式
-nanocc --assistant
-
-# 恢复上次 session
-nanocc --continue
-
-# 恢复指定 session
-nanocc --session-id abc123
-
-# Assistant + Telegram 通道
-nanocc --assistant --channel telegram --bot-token $TG_TOKEN
-```
-
-#### 10.2 Proactive 主动式工作 (`proactive.py`)
+#### 10.1 Proactive 主动式工作 (`proactive.py`)
 
 ```python
 class ProactiveEngine:
@@ -749,7 +681,7 @@ class SleepTool(Tool):
         return ToolResult(content="Woke up")
 ```
 
-#### 10.3 Brief 结构化消息 (`brief.py`)
+#### 10.2 Brief 结构化消息 (`brief.py`)
 
 ```python
 class BriefTool(Tool):
@@ -768,17 +700,16 @@ class BriefTool(Tool):
 
     async def execute(self, input, context):
         """
-        发送结构化消息：
-        - CLI 模式：Rich 渲染到终端
-        - Channel 模式：通过 channel.send_message() 发送
-        - SDK 模式：yield 为 BriefEvent
+        发送结构化消息。BriefTool 不在默认 registry 中，
+        由 cowork 在启用 assistant_mode 时手动追加到 tools 列表，
+        并通过 context.options["brief_handler"] 注入回调来路由消息。
 
         status="proactive" 时标记为主动通知，
-        Channel 适配器可据此决定是否静默或加 badge。
+        cowork 的 channel 适配器可据此决定是否静默或加 badge。
         """
 ```
 
-#### 10.4 Assistant 模式与现有模块的交互
+#### 10.3 Assistant 模式与现有模块的交互
 
 ```
 普通 REPL 模式                     Assistant 模式
@@ -826,124 +757,25 @@ async def query(params: QueryParams) -> AsyncGenerator[...]:
 - Dispatcher 分解任务，Workers 并发执行
 - 读任务并行，写任务串行
 
-### 12. Channel / IM 通道 (`channels/`) -- 新增，替代 Remote/Bridge
+### 12. Channel / IM 通道 → cowork 产品层
 
-**设计理念**：Claude Code 的 Bridge/Remote 是为了远程控制 agent session。nanocc 把这个概念泛化为 **Channel**——任何消息收发通道都可以驱动 agent。
+**Channel/IM 实现已不在 nanocc 范围内**。原计划的 Telegram/Webhook/WebSocket 通道全部移至 cowork 产品。
 
-```python
-# base.py
-class Channel(Protocol):
-    """消息通道抽象——任何能收发消息的东西"""
+**边界划分**：
+- **nanocc 提供**：QueryEngine 的 `submit_message()` 接口、`get_state()`/`restore_state()` 序列化、
+  ProactiveEngine 事件队列、BriefTool 的 `brief_handler` 注入回调点。
+- **cowork 提供**：Channel Protocol 定义、Telegram/Slack/飞书 Bot 实现、SessionManager 多 session 编排、
+  channel_id → session 路由、用户认证、权限确认 UI。
 
-    async def start(self):
-        """启动通道（监听消息）"""
-
-    async def stop(self):
-        """停止通道"""
-
-    async def send_message(self, session_id: str, content: str,
-                           attachments: list[str] | None = None):
-        """向用户发送消息（支持 markdown、代码块）"""
-
-    async def send_permission_request(self, session_id: str,
-                                       tool_name: str, description: str) -> bool:
-        """发送权限确认请求，等待用户回复"""
-
-    def on_message(self, callback: Callable[[str, str], Awaitable[None]]):
-        """注册消息回调 (session_id, message) -> None"""
-
-# telegram.py
-class TelegramChannel(Channel):
-    """Telegram Bot 通道"""
-
-    def __init__(self, bot_token: str, allowed_users: list[int] | None = None):
-        self._bot = ...  # python-telegram-bot
-        self._sessions: dict[int, QueryEngine] = {}  # chat_id -> engine
-
-    async def start(self):
-        """启动 polling / webhook"""
-
-    async def _handle_message(self, update):
-        """
-        1. 从 update 获取 chat_id 和 text
-        2. 获取或创建 QueryEngine session
-        3. 调用 engine.submit_message(text)
-        4. 流式发送回复（长消息分段、代码块格式化）
-        """
-
-    async def send_message(self, session_id, content, attachments=None):
-        """
-        发送消息到 Telegram：
-        - Markdown 转 Telegram MarkdownV2
-        - 长消息自动分段（4096 字符限制）
-        - 代码块保持格式
-        """
-
-    async def send_permission_request(self, session_id, tool_name, description) -> bool:
-        """
-        发送 inline keyboard 请求确认：
-        [✅ Allow] [❌ Deny] [🔓 Always Allow]
-        等待用户点击回调
-        """
-
-# webhook.py
-class WebhookChannel(Channel):
-    """通用 Webhook 通道（Slack / Discord / 飞书 / 钉钉）"""
-
-    def __init__(self, incoming_url: str, outgoing_secret: str,
-                 adapter: str = "slack"):
-        """
-        adapter 决定消息格式转换：
-        - "slack": Slack Block Kit
-        - "discord": Discord embed
-        - "feishu": 飞书卡片
-        """
-
-# websocket.py
-class WebSocketChannel(Channel):
-    """WebSocket 通道，用于 Web UI 或自定义前端"""
-
-    def __init__(self, host: str = "localhost", port: int = 8765):
-        """
-        协议格式（JSON）：
-        -> { type: "message", session_id: "...", content: "..." }
-        <- { type: "response", session_id: "...", content: "...", stream: true }
-        <- { type: "permission_request", ... }
-        -> { type: "permission_response", ... }
-        """
-```
-
-**Channel vs Claude Code Bridge 的对比**：
-
-| Claude Code Bridge | nanocc Channel |
-|---|---|
-| 专用 API endpoint + WebSocket | 泛化消息通道协议 |
-| 只能通过 anthropic.com 中转 | 直接对接任意 IM |
-| 复杂的 environment/work/secret 协议 | 简单的 message/permission 协议 |
-| 固定 SDKMessage 格式 | 每个 channel adapter 自行转换 |
-
-**Channel 启动方式**：
-```bash
-# 终端 CLI（默认）
-nanocc
-
-# Telegram Bot
-nanocc --channel telegram --bot-token $TG_TOKEN
-
-# WebSocket server
-nanocc --channel websocket --port 8765
-
-# 组合模式：CLI + Telegram 同时运行
-nanocc --channel cli+telegram --bot-token $TG_TOKEN
-```
+详见 `docs/cowork-boundary.md`。
 
 ### 13. CLI (`cli/`)
 
-- `click` 做参数解析，增加 `--assistant`、`--continue`、`--session-id` 标志
+- `click` 做参数解析，`-c`/`--continue` 恢复最近 session
 - `rich` 做终端渲染：Markdown、语法高亮、diff、进度条
-- REPL 模式 + 一次性模式 (`-p`) + Assistant 模式 (`--assistant`)
+- REPL 模式 + 一次性模式 (`-p`)
 - 权限确认框 (y/n/always)
-- Slash 命令：`/compact`, `/clear`, `/history`, `/cost`, `/model`, `/help`, `/dream`, `/brief`
+- Slash 命令：`/compact`, `/clear`, `/history`, `/cost`, `/model`, `/help`, `/resume`
 
 ### 14. SDK (`sdk.py`)
 
@@ -956,14 +788,16 @@ async for event in session.send("修复这个 bug"):
 # 无状态一次性
 result = await nanocc.query("解释这段代码", provider="anthropic")
 
-# Assistant 模式（长驻后台）
-session = nanoccSession(config, assistant=True)
-await session.run_forever()  # tick 循环 + 等待消息
+# Assistant 模式机制（由上层产品如 cowork 编排）
+from nanocc import QueryEngine, ProactiveEngine
+from nanocc.assistant.brief import BriefTool, SleepTool
 
-# Channel 驱动 + Assistant
-channel = TelegramChannel(bot_token="...")
-server = nanoccServer(config, channel, assistant=True)
-await server.run()  # TG bot + proactive tick
+engine = QueryEngine(config)
+engine.config.assistant_mode = True
+engine.tools.extend([BriefTool(), SleepTool()])
+engine.proactive_engine = ProactiveEngine(tick_interval=120)
+
+# 上层产品自己实现 tick 启动 / 消息注入 / 通道路由
 ```
 
 ---
@@ -974,7 +808,7 @@ await server.run()  # TG bot + proactive tick
 |---|---|---|
 | 异步 generator agent loop | **保留** | 核心架构 |
 | QueryEngine 有状态会话 | **保留** | |
-| 工具系统 (45+ 工具) | **精简** 为 12 个 | 核心工具 + Skill + Brief + Sleep + MCP 动态扩展 |
+| 工具系统 (45+ 工具) | **精简** 为 10 个核心 + 2 个可选 | 核心工具 + Skill + 可选 Brief/Sleep（assistant 模式）+ MCP 动态扩展 |
 | 权限模型 (allow/deny/ask) | **保留** | |
 | 并发工具执行 | **保留** | 读并行/写串行 |
 | 7 层 compact 管线 | **精简** 为 3 层 | budget + micro + auto |
@@ -989,19 +823,19 @@ await server.run()  # TG bot + proactive tick
 | **Skill 系统** | **保留** | frontmatter + markdown prompt 展开器 |
 | **MCP 集成** | **保留** | stdio/http/sse transport，工具/资源发现 |
 | **Hooks / Harness** | **保留** | command/prompt/http 三种 hook，5 种事件 |
-| **KAIROS / Assistant 模式** | **保留** | session 持久化、proactive tick、日志制 memory |
-| **Brief / 结构化消息** | **保留** | Assistant 模式主输出通道 |
+| **KAIROS / Assistant 模式** | **机制保留**，编排移至 cowork | nanocc 提供 ProactiveEngine + Brief/Sleep；session 生命周期编排（activate/suspend/resume）由 cowork SessionManager 管理 |
+| **Brief / 结构化消息** | **保留** | nanocc 提供工具，cowork 注入 brief_handler 路由消息 |
 | **Proactive / tick 机制** | **保留** | 周期唤醒 + Sleep 工具 + 焦点感知 |
 | **Daily Log Memory** | **保留** | append-only 日志 + /dream 蒸馏 |
-| **Session 挂起/恢复** | **保留** | --continue / --session-id |
-| **Remote/Bridge** | **替换** 为 Channel | Telegram/Webhook/WebSocket 通道 |
+| **Session 挂起/恢复** | **保留** | engine.get_state/restore_state + session_storage；CLI -c/--continue |
+| **Remote/Bridge** | **移至 cowork** | Channel Protocol + Telegram/Slack/WebSocket 实现都在 cowork 产品 |
 | 多级 abort | **精简** | 单 AbortController |
 | StreamingToolExecutor | **去掉** | 等完整消息再执行 |
 | Reactive compact | **去掉** | 返回 prompt_too_long |
 | Context collapse | **去掉** | |
 | Team memory | **去掉** | |
 | 插件系统 | **去掉** | MCP + Skill + Hook 覆盖 |
-| GitHub Webhooks | **去掉** | 通过 Channel webhook 替代 |
+| GitHub Webhooks | **去掉** | 由 cowork 等上层产品自行集成 |
 | SendUserFile | **去掉** | Brief attachments 覆盖 |
 
 ---
@@ -1020,11 +854,9 @@ dependencies = [
     "mcp>=1.0.0",                # MCP SDK (stdio/sse transport)
 ]
 
-[project.optional-dependencies]
-telegram = ["python-telegram-bot>=21.0"]
-websocket = ["websockets>=12.0"]
-all = ["python-telegram-bot>=21.0", "websockets>=12.0"]
 ```
+
+> Channel/IM 相关依赖（python-telegram-bot、websockets 等）由 cowork 产品自行声明，不在 nanocc 范围内。
 
 ---
 
@@ -1068,33 +900,27 @@ all = ["python-telegram-bot>=21.0", "websockets>=12.0"]
 - `tools/agent_tool.py`, `tools/ask_user.py`, `tools/web_fetch.py`
 - **里程碑**: 能启动子 agent 并行工作
 
-### Phase 7: Assistant / KAIROS 模式 ~520 行
-- `assistant/mode.py`（模式检测、session 持久化、--continue 恢复）
-- `assistant/proactive.py`（tick 循环、Sleep 工具、焦点感知）
-- `assistant/brief.py`（Brief 结构化消息工具）
+### Phase 7: Assistant 模式机制 ~250 行
+- `assistant/proactive.py`（tick 循环、唤醒事件队列、焦点感知）
+- `assistant/brief.py`（Brief / Sleep 工具）
 - `query.py` 增加 tick 处理分支
-- `engine.py` 增加 `suspend()` / `resume()` 方法
-- memory 模块增加日志制/索引制模式切换
-- **里程碑**: `nanocc --assistant` 能启动长驻模式；`nanocc --continue` 能恢复 session
+- `engine.py` 增加 `get_state()` / `restore_state()` / `save_session()`
+- **里程碑**: 上层产品可注入 ProactiveEngine 让 query loop 在 end_turn 后等待 tick
 
 ### Phase 8: CLI / 终端 UI ~1,000 行
 - `cli/` 全部 4 个模块
-- CLI 参数增加 `--assistant`, `--continue`, `--session-id`
-- **里程碑**: 完整交互式 CLI + Assistant 模式 UI
+- CLI 参数 `-c`/`--continue` 恢复最近 session
+- **里程碑**: 完整交互式 CLI + `/resume` 命令
 
-### Phase 9: Channel / IM 通道 ~700 行
-- `channels/base.py`, `channels/telegram.py`
-- `channels/webhook.py`, `channels/websocket.py`
-- CLI 增加 `--channel` 参数
-- Channel + Assistant 组合模式
-- **里程碑**: `nanocc --assistant --channel telegram` 可运行主动式 TG bot
+### Phase 9: ~~Channel / IM 通道~~ → 移至 cowork 产品
+- nanocc 不再实现 Channel/IM。Telegram/Slack/WebSocket 等通道由 cowork 项目独立维护
+- nanocc 只负责暴露 QueryEngine 接口供 cowork 调用
 
-### Phase 10: SDK + OpenAI Provider + 打包 ~600 行
-- `sdk.py`（含 `run_forever()` assistant API）
-- `providers/openai_compat.py`
+### Phase 10: SDK + 打包 ~600 行
+- `sdk.py` 暴露 QueryEngine + ProactiveEngine + tools 给上层产品
 - `__init__.py`, `__main__.py`, `pyproject.toml`
 - `utils/cost.py`
-- **里程碑**: pip install 可用
+- **里程碑**: pip install 可用，cowork 可以 `from nanocc import QueryEngine`
 
 ---
 
@@ -1106,10 +932,10 @@ all = ["python-telegram-bot>=21.0", "websockets>=12.0"]
 4. **Phase 4**: 连续两次启动验证 memory 持久化；auto_dream 门控检查；daily_log 追加写入
 5. **Phase 5**: `/commit` skill 可用；MCP server 工具能调用；settings.json hooks 触发
 6. **Phase 6**: "并行搜索三个目录的 TODO" 能启动子 agent
-7. **Phase 7**: `nanocc --assistant` 启动后 tick 唤醒；Brief 消息输出；`--continue` 恢复上次 session；memory 自动切换为日志制
-8. **Phase 8**: 交互式 REPL 全功能
-9. **Phase 9**: `nanocc --assistant --channel telegram` TG bot 主动通知 + 权限确认
-10. **Phase 10**: `pip install .` + `nanocc` 命令 + `import nanocc` SDK + `session.run_forever()`
+7. **Phase 7**: 注入 ProactiveEngine 后 tick 能唤醒 query loop；Brief/Sleep 工具可用；engine.get_state/restore_state 可往返
+8. **Phase 8**: 交互式 REPL 全功能 + `-c`/`--continue` + `/resume`
+9. **Phase 9**: ~~移至 cowork~~
+10. **Phase 10**: `pip install .` + `nanocc` 命令 + `import nanocc` SDK + cowork 可作为消费者集成
 
 ---
 
@@ -1118,15 +944,15 @@ all = ["python-telegram-bot>=21.0", "websockets>=12.0"]
 ```
                     ┌───────────────────────────────────────┐
                     │           入口层 (Entrypoints)         │
-                    │  CLI(REPL) │ Channel(TG/WS) │ SDK     │
-                    │            │                │         │
-                    │  --assistant / --continue 切换模式     │
-                    └──────┬─────┴───────┬────────┴────┬───┘
-                           │             │             │
-                    ┌──────▼─────────────▼─────────────▼───┐
+                    │  CLI(REPL)  │  SDK  │  cowork 产品    │
+                    │             │       │  (外部消费者)    │
+                    │  -c/--continue 恢复最近 session        │
+                    └──────┬──────┴───┬───┴────────┬────────┘
+                           │          │            │
+                    ┌──────▼──────────▼────────────▼───────┐
                     │        QueryEngine (engine.py)         │
-                    │   mutableMessages / abort / usage      │
-                    │   suspend() / resume() session 持久化  │
+                    │  mutableMessages / abort / usage      │
+                    │  get_state / restore_state / save     │
                     └──────────────┬────────────────────────┘
                                    │
          ┌─────────────────────────▼─────────────────────────────┐
@@ -1165,9 +991,10 @@ all = ["python-telegram-bot>=21.0", "websockets>=12.0"]
               ┌────────────────────┼────────────────────┐
               │                    │                     │
     ┌─────────▼──────┐  ┌────────▼────────┐   ┌───────▼───────┐
-    │ Tools (12个)    │  │  Skills (.md)   │   │  MCP Servers  │
+    │ Tools (10 核心) │  │  Skills (.md)   │   │  MCP Servers  │
     │ Bash/File/Grep  │  │ commit/review   │   │ 外部工具/资源  │
-    │ Brief/Sleep/... │  │ dream/...       │   │               │
+    │ + Brief/Sleep   │  │ dream/...       │   │               │
+    │  (assistant 可选)│  │                │   │               │
     └────────────────┘  └─────────────────┘   └───────────────┘
               │
     ┌─────────▼──────────────────────────────────────────────┐
@@ -1208,16 +1035,17 @@ all = ["python-telegram-bot>=21.0", "websockets>=12.0"]
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
-│                    Assistant 模式                            │
+│         Assistant 模式（机制由 nanocc 提供，编排在 cowork）   │
 │                                                             │
-│  nanocc --assistant [--channel telegram]                   │
+│  cowork SessionManager 配置 nanocc 实例：                    │
+│  ├── engine.config.assistant_mode = True                    │
+│  ├── engine.proactive_engine = ProactiveEngine(...)          │
+│  ├── engine.tools.extend([BriefTool(), SleepTool()])        │
 │  ├── 用户输入 + tick 周期唤醒 双驱动                         │
-│  ├── Memory: 日志制（append-only → /dream 蒸馏）             │
-│  ├── Auto Dream: 手动 /dream（日志量大，不适合全自动）        │
-│  ├── 输出: Brief 结构化消息（可推送到 IM）                   │
-│  ├── Session: 可挂起/恢复（--continue / --session-id）       │
-│  └── Proactive: 空闲时自主检查任务、review 代码             │
+│  ├── 输出: Brief 工具 → cowork brief_handler → IM/Web/桌面  │
+│  └── Session: 可挂起/恢复（cowork 调用 get/restore_state）   │
 │                                                             │
 │  适合：长驻后台助手、IM bot、CI/CD 集成、团队 agent          │
+│  注意：nanocc CLI 自身不提供 --assistant 标志                 │
 └─────────────────────────────────────────────────────────────┘
 ```

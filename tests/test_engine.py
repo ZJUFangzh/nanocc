@@ -20,7 +20,7 @@ def engine():
 
 def test_engine_init(engine):
     assert engine.messages == []
-    assert len(engine.tools) == 12
+    assert len(engine.tools) == 10
     assert engine.usage.api_calls == 0
     assert engine.session_memory.initialized is False
 

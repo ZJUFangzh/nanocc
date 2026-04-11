@@ -269,20 +269,46 @@ uv run nanocc -p "List all .py files and count lines" --api-key $KEY -m moonshot
 
 ---
 
+## 架构分离 ✅ (2026-04-11)
+
+**目标**: 把产品层逻辑（IM 接入、session 编排）从 nanocc 中剥离，移至独立的 cowork 项目。
+nanocc 重新定位为纯 agent runtime。
+
+**变更**:
+- 删除 `src/nanocc/assistant/mode.py` — AssistantMode 生命周期编排器移至 cowork SessionManager
+- 删除 `src/nanocc/channels/` — Channel/IM 实现移至 cowork（原计划的 Telegram/Webhook/WebSocket 通道）
+- `tools/registry.py` 移除 BriefTool/SleepTool — assistant 模式专属工具，cowork 启用时手动追加
+- `tests/test_assistant.py` 移除 6 个 AssistantMode 测试（保留 ProactiveEngine/Brief/Sleep 测试）
+- `tests/test_tools.py` `tests/test_engine.py` 工具数断言 12 → 10
+- `ARCHITECTURE.md` 重写 Section 12（Channel/IM）为 cowork 边界说明，Section 10 移除 AssistantMode 子节
+- 新增 `docs/cowork-boundary.md` — cowork 项目消费 nanocc 的方式
+
+**保留的机制（cowork 会用到）**:
+- `assistant/proactive.py` — ProactiveEngine 事件队列
+- `assistant/brief.py` — BriefTool / SleepTool（cowork 手动追加）
+- `query.py:184-193` — tick 分支
+- `engine.py` get_state/restore_state/save_session — 序列化接口
+- `utils/session_storage.py` — 持久化实现
+
+**测试**: 170 个全部通过
+
+---
+
 ## 当前统计
 
 | 指标 | 值 |
 |---|---|
-| 总代码行数 | ~6,700 |
+| 总代码行数 | ~6,500 |
 | 目标行数 | ~9,800 |
-| 完成 Phase | 7 / 10 + 链路修复 + 配置/持久化/精简 |
-| Python 文件数 | 85 (含 17 个测试) |
-| 核心工具数 | 12 (Bash, Read, Write, Edit, Glob, Grep, Agent, AskUser, WebFetch, Skill, Brief, Sleep) |
+| 完成 Phase | 7 / 10 + 链路修复 + 配置/持久化/精简 + 架构分离 |
+| Python 文件数 | 84 (含 17 个测试) |
+| 核心工具数 | 10 (Bash, Read, Write, Edit, Glob, Grep, Agent, AskUser, WebFetch, Skill) |
+| 可选工具 | 2 (Brief, Sleep) — 由 cowork 在 assistant 模式启用时追加 |
 | 支持的 Provider | 3 + custom (openrouter, anthropic, openai) |
 | Compact 层数 | 3 (budget + micro + auto) |
 | 记忆模块 | 6 (memdir, session_memory, claude_md, extract, auto_dream, daily_log) |
 | MCP transport | 3 (stdio, http, sse) |
-| 测试用例 | 176 |
+| 测试用例 | 170 |
 
 ---
 
@@ -291,5 +317,5 @@ uv run nanocc -p "List all .py files and count lines" --api-key $KEY -m moonshot
 | Phase | 内容 | 预估行数 |
 |---|---|---|
 | 8 | CLI 终端 UI 完善 | ~1,000 |
-| 9 | Channel / IM 通道 | ~700 |
-| 10 | SDK + OpenAI Provider + 打包 | ~600 |
+| 9 | ~~Channel / IM 通道~~ | 移至 cowork |
+| 10 | SDK + 打包 | ~600 |
